@@ -10,5 +10,6 @@ import { RoundModule } from '../round/round.module';
   imports: [TypeOrmModule.forFeature([Match, Player]), RoundModule, WordsModule],
   controllers: [MatchController],
   providers: [MatchService],
+  exports: [MatchService],
 })
 export class MatchModule {}

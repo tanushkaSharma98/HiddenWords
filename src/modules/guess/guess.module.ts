@@ -10,5 +10,6 @@ import { Player } from 'src/entities/player.entity';
   imports: [TypeOrmModule.forFeature([Guess, Round, Player])],
   providers: [GuessService],
   controllers: [GuessController],
+  exports: [GuessService], 
 })
 export class GuessModule {}

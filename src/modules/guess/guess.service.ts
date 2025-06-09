@@ -13,7 +13,11 @@ export class GuessService {
     @InjectRepository(Player) private readonly playerRepo: Repository<Player>,
   ) {}
 
-  async createGuess(roundId: string, playerId: string, guessText: string): Promise<Guess> {
+  async createGuess(
+    roundId: string,
+    playerId: string,
+    guessText: string,
+  ): Promise<Guess> {
     const round = await this.roundRepo.findOne({
       where: { id: roundId },
       relations: ['match', 'winner'],
@@ -25,7 +29,8 @@ export class GuessService {
     const player = await this.playerRepo.findOneBy({ id: playerId });
     if (!player) throw new NotFoundException(`Player ${playerId} not found`);
 
-    const isCorrect = guessText.trim().toLowerCase() === round.word.toLowerCase();
+    const isCorrect =
+      guessText.trim().toLowerCase() === round.word.toLowerCase();
 
     const guess = this.guessRepo.create({
       guess: guessText,
@@ -40,6 +45,16 @@ export class GuessService {
       await this.roundRepo.save(round);
     }
 
-    return this.guessRepo.save(guess);
+    const savedGuess = await this.guessRepo.save(guess);
+
+    // Log the guess that was created
+    console.log('Guess Created:', {
+      guess: savedGuess.guess,
+      isCorrect: savedGuess.isCorrect,
+      playerId: savedGuess.player.id,
+      roundId: savedGuess.round.id,
+    });
+
+    return savedGuess;
   }
 }

@@ -49,7 +49,7 @@ export class GameService {
       });
       await this.matchRepo.save(match);
 
-      const word = 'apple';
+      const word = ' ';
       const round = this.roundRepo.create({
         match,
         word,

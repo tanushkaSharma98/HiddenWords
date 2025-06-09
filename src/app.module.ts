@@ -12,6 +12,7 @@ import { GameModule } from './modules/game/game.module';
 import { RoundModule } from './modules/round/round.module';
 import { WordsModule } from './modules/words/words.module';
 import { GuessModule } from './modules/guess/guess.module';
+import { GameGateway } from './modules/game/game.gateway';
 
 @Module({
   imports: [
@@ -33,8 +34,13 @@ import { GuessModule } from './modules/guess/guess.module';
       RoundModule,
       WordsModule,
     GuessModule,
+
   ],
   controllers: [AppController],
   providers: [AppService],
+  
+  
 })
 export class AppModule {}
+
+

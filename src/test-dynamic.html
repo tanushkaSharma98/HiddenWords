@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Two Player WebSocket Lobby Test</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+  <h2>WebSocket Lobby Test with Two Players</h2>
+  <p id="status">Creating player and connecting...</p>
+
+  <script>
+    const API_BASE = "http://localhost:3000/api";
+
+    async function createPlayer() {
+      const res = await fetch(`${API_BASE}/player/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      return res.json();
+    }
+
+    async function initPlayerAndConnect() {
+      const player = await createPlayer();
+      const playerId = player.playerId;
+      document.getElementById("status").innerText = `Created Player: ${playerId}`;
+
+      const socket = io("http://localhost:3000");
+
+      socket.on("connect", () => {
+        console.log(" Connected to WebSocket");
+        socket.emit("joinLobby", { playerId });
+        document.getElementById("status").innerText += `\n Waiting for opponent...`;
+      });
+
+      socket.on("waitingForOpponent", () => {
+        console.log(" Waiting for opponent...");
+        document.getElementById("status").innerText += `\n Still waiting...`;
+      });
+
+      socket.on("matchStarted", (data) => {
+        console.log(" Match Started!", data);
+        document.getElementById("status").innerText = ` Match Started!\nMatch ID: ${data.matchId}\nOpponent: ${data.opponentId}\nRound ID: ${data.firstRound.roundId}`;
+
+        // Auto-guess with the correct word for test
+        socket.emit("newGuess", {
+          roundId: data.firstRound.roundId,
+          playerId,
+          guess: data.firstRound.word, // auto guess correct word
+        });
+      });
+
+      socket.on("guessResult", (data) => {
+        console.log(" Guess Result:", data);
+        document.getElementById("status").innerText += `\n Your Guess: ${data.guess} (${data.isCorrect ? 'Correct' : 'Wrong'})`;
+      });
+
+      socket.on("newGuessBroadcast", (data) => {
+        console.log(" Broadcast Guess:", data);
+      });
+
+      socket.on("roundEnded", (data) => {
+        console.log(" Round Ended:", data);
+        document.getElementById("status").innerText += `\n Winner: ${data.winnerId}`;
+      });
+
+      socket.on("disconnect", () => {
+        console.log(" Disconnected");
+      });
+
+      socket.on("errorMsg", (data) => {
+        console.error(" Error:", data.message);
+        document.getElementById("status").innerText += `\n Error: ${data.message}`;
+      });
+    }
+
+    initPlayerAndConnect();
+  </script>
+</body>
+</html>
