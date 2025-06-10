@@ -1,17 +1,14 @@
 import {
   WebSocketGateway,
-  SubscribeMessage,
-  MessageBody,
   WebSocketServer,
-  ConnectedSocket,
+  SubscribeMessage,
   OnGatewayConnection,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { GuessService } from 'src/modules/guess/guess.service';
-import { RoundService } from 'src/modules/round/round.service';
-import { MatchService } from 'src/modules/match/match.service';
-import { Round } from 'src/entities/round.entity';
+import { GameService } from './game.service';
+import { Logger } from '@nestjs/common';
+import { v4 as uuidv4 } from 'uuid';
 
 @WebSocketGateway({
   cors: {
@@ -19,219 +16,194 @@ import { Round } from 'src/entities/round.entity';
   },
 })
 export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer()
-  server: Server;
-
+  @WebSocketServer() server: Server;
+  private logger = new Logger('GameGateway');
+  private activeGames = new Map<string, any>();
+  private playerSockets = new Map<string, Socket>();
   private socketToPlayer = new Map<string, string>();
-  private waitingPlayer: { socket: Socket; playerId: string } | null = null;
-  private tickIntervals = new Map<string, NodeJS.Timeout>();
 
-  constructor(
-    private readonly guessService: GuessService,
-    private readonly roundService: RoundService,
-    private readonly matchService: MatchService,
-  ) {}
+  constructor(private readonly gameService: GameService) {}
 
-  handleConnection(socket: Socket) {
-    console.log(`Client connected: ${socket.id}`);
+  async handleConnection(client: Socket) {
+    const playerId = uuidv4();
+    this.socketToPlayer.set(client.id, playerId);
+
+    // Create a new player in the database if not exists
+    await this.gameService.createPlayerIfNotExists(playerId);
+
+    client.emit('playerId', { playerId });
+    this.logger.log(`Assigned playerId ${playerId} to socket ${client.id}`);
   }
 
-  handleDisconnect(socket: Socket) {
-    const playerId = this.socketToPlayer.get(socket.id);
-    console.log(`Client disconnected: ${socket.id} (Player: ${playerId})`);
-    this.socketToPlayer.delete(socket.id);
-
-    if (this.waitingPlayer?.socket.id === socket.id) {
-      this.waitingPlayer = null;
+  async handleDisconnect(client: Socket) {
+    this.logger.log(`Client disconnected: ${client.id}`);
+    // Handle player disconnection
+    const gameId = this.findGameByPlayerId(client.id);
+    if (gameId) {
+      await this.handlePlayerDisconnect(gameId, client.id);
     }
   }
 
   @SubscribeMessage('joinLobby')
-  async handleJoinLobby(
-    @MessageBody() data: { playerId: string },
-    @ConnectedSocket() client: Socket,
-  ) {
-    console.log('joinLobby received from:', data.playerId);
-    this.socketToPlayer.set(client.id, data.playerId);
-
-    if (!this.waitingPlayer) {
-      this.waitingPlayer = { socket: client, playerId: data.playerId };
-      client.emit('waitingForOpponent');
-    } else {
-      const player1Id = this.waitingPlayer.playerId;
-      const player2Id = data.playerId;
-
-      const matchResult = await this.matchService.createMatch({
-        player1Id,
-        player2Id,
-      });
-
-      const matchId = matchResult.matchId;
-
-      client.join(matchId);
-      this.waitingPlayer.socket.join(matchId);
-
-      client.emit('matchStarted', {
-        matchId,
-        opponentId: player1Id,
-        firstRound: matchResult.firstRound,
-      });
-
-      this.waitingPlayer.socket.emit('matchStarted', {
-        matchId,
-        opponentId: player2Id,
-        firstRound: matchResult.firstRound,
-      });
-//       console.log('✅ Emitting matchStarted to both players:', {
-//   player1Id,
-//   player2Id,
-//   matchId,
-// });
-
-
-      const fullRound = await this.roundService.getRoundById(
-        matchResult.firstRound.roundId,
-      );
-      await this.startTickCycle(fullRound, matchId);
-
-      this.waitingPlayer = null;
+  async handleJoinLobby(client: Socket) {
+    const playerId = this.socketToPlayer.get(client.id);
+    if (!playerId) {
+      this.logger.error(`No playerId found for socket ${client.id}`);
+      client.emit('error', { message: 'Player ID not found. Please refresh and try again.' });
+      return;
+    }
+    // Now use playerId (UUID) for all DB operations
+    const gameId = await this.gameService.addPlayerToLobby(playerId);
+    this.playerSockets.set(client.id, client);
+    
+    if (gameId) {
+      this.logger.log(`Two players matched! Starting game with gameId: ${gameId}`);
+      this.startGame(gameId);
     }
   }
 
   @SubscribeMessage('joinMatch')
-  handleJoinMatch(
-    @MessageBody() data: { matchId: string; playerId: string },
-    @ConnectedSocket() socket: Socket,
-  ) {
-    console.log('joinMatch received:', data);
-    socket.join(data.matchId);
-    this.socketToPlayer.set(socket.id, data.playerId);
-    this.server.to(data.matchId).emit('playerJoined', {
-      message: `Player ${data.playerId} joined match ${data.matchId}`,
-    });
+async handleJoinMatch(client: Socket, { matchId, playerId }) {
+  client.join(matchId);
+  this.server.to(matchId).emit('playerJoined', { playerId });
+}
+
+  @SubscribeMessage('submitGuess')
+  async handleGuess(client: Socket, payload: { gameId: string; guess: string }) {
+    const { gameId, guess } = payload;
+    const game = this.activeGames.get(gameId);
+    
+    if (!game || game.status !== 'active') {
+      return { error: 'Invalid game state' };
+    }
+
+    const result = await this.gameService.processGuess(gameId, client.id, guess);
+    if (result.winner) {
+      this.endRound(gameId, result);
+    }
+    
+    return result;
   }
 
-  @SubscribeMessage('newGuess')
-  async handleNewGuess(
-    @MessageBody() data: { roundId: string; playerId: string; guess: string },
-    @ConnectedSocket() socket: Socket,
-  ) {
-    console.log('newGuess received:', data);
+  private async startGame(gameId: string) {
+    const game = await this.gameService.initializeGame(gameId);
+    this.activeGames.set(gameId, game);
+    
+    // Notify both players
+    this.logger.log(`Emitting gameStart to gameId: ${gameId}`);
+    this.server.to(gameId).emit('gameStart', {
+      gameId,
+      wordLength: game.word.length,
+      roundId: game.currentRound
+    });
 
-    try {
-      const round = await this.roundService.getRoundById(data.roundId);
-      if (round.endedAt) {
-        socket.emit('errorMsg', {
-          message: 'Round already ended',
-        });
-        return;
-      }
+    // Start the first tick
+    this.startTick(gameId);
+  }
 
-      const guess = await this.guessService.createGuess(
-        data.roundId,
-        data.playerId,
-        data.guess,
-      );
+  private startTick(gameId: string) {
+    const game = this.activeGames.get(gameId);
+    if (!game) return;
 
-      socket.emit('guessResult', {
-        isCorrect: guess.isCorrect,
-        guess: guess.guess,
-      });
+    this.server.to(gameId).emit('tickStart', {
+      gameId,
+      timeRemaining: 5000 // 5 seconds
+    });
 
-      const matchId = round.match.id;
+    setTimeout(() => {
+      this.endTick(gameId);
+    }, 5000);
+  }
 
-      this.server.to(matchId).emit('newGuessBroadcast', {
-        playerId: data.playerId,
-        guess: guess.guess,
-        isCorrect: guess.isCorrect,
-      });
+  private async endTick(gameId: string) {
+    const game = this.activeGames.get(gameId);
+    if (!game) return;
 
-      if (guess.isCorrect) {
-        console.log(` Round Ended: Winner = ${data.playerId}`);
-        clearInterval(this.tickIntervals.get(round.id));
-        this.tickIntervals.delete(round.id);
+    const revealedTile = await this.gameService.revealRandomTile(gameId);
+    
+    if (!revealedTile) {
+      this.logger.error(`Failed to reveal tile for game ${gameId}`);
+      return;
+    }
 
-        await this.roundService.setRoundWinner(data.roundId, data.playerId);
+    this.server.to(gameId).emit('revealTile', {
+      gameId,
+      index: revealedTile.index,
+      letter: revealedTile.letter
+    });
 
-        this.server.to(matchId).emit('roundEnded', {
-          winnerId: data.playerId,
-          roundId: data.roundId,
-        });
-
-        await this.roundService.checkAndEndMatchIfCompleted(matchId);
-        console.log(` Checked if match ${matchId} needs to be ended.`);
-
-        const nextRound =
-          await this.roundService.createNextRoundIfMatchOngoing(matchId);
-        if (nextRound) {
-          console.log(` Next round started for match ${matchId}`);
-          this.server.to(matchId).emit('nextRoundStarted', {
-            roundId: nextRound.id,
-            wordLength: nextRound.word.length,
-            roundNumber: nextRound.roundNumber,
-          });
-          await this.startTickCycle(nextRound, matchId);
-        }
-      }
-    } catch (error) {
-      socket.emit('errorMsg', {
-        message: error.message || 'An error occurred during guess.',
-      });
+    if (revealedTile.isComplete) {
+      this.endRound(gameId, { winner: null, revealedWord: game.word });
+    } else {
+      this.startTick(gameId);
     }
   }
 
-  // ✅ Updated Tick and Reveal Logic
-  private async startTickCycle(round: Round, matchId: string) {
-    const roundId = round.id;
-    const wordLength = round.word.length;
-    const maxReveals = Math.ceil(wordLength * 0.6); // Max 60% of word
-    let revealCount = 0;
+  private async endRound(gameId: string, result: any) {
+    const game = this.activeGames.get(gameId);
+    if (!game) return;
 
-    const interval = setInterval(async () => {
-      const updatedRound = await this.roundService.getRoundById(roundId);
-      if (updatedRound.endedAt) {
-        clearInterval(interval);
-        this.tickIntervals.delete(roundId);
-        return;
+    await this.gameService.endRound(gameId, result);
+    
+    this.server.to(gameId).emit('roundEnd', {
+      gameId,
+      winner: result.winner,
+      revealedWord: result.revealedWord,
+      scores: game.scores
+    });
+
+    // Start next round or end game
+    if (this.shouldEndGame(game)) {
+      this.endGame(gameId);
+    } else {
+      this.startGame(gameId);
+    }
+  }
+
+  private async endGame(gameId: string) {
+    const game = this.activeGames.get(gameId);
+    if (!game) return;
+
+    this.server.to(gameId).emit('gameEnd', {
+      gameId,
+      winner: this.determineGameWinner(game),
+      finalScores: game.scores
+    });
+
+    this.activeGames.delete(gameId);
+  }
+
+  private findGameByPlayerId(playerId: string): string | null {
+    for (const [gameId, game] of this.activeGames.entries()) {
+      if (game.players.includes(playerId)) {
+        return gameId;
       }
+    }
+    return null;
+  }
 
-      const unrevealedIndexes = updatedRound.revealedTiles
-        .map((revealed, index) => (!revealed ? index : null))
-        .filter((index) => index !== null);
+  private async handlePlayerDisconnect(gameId: string, playerId: string) {
+    const game = this.activeGames.get(gameId);
+    if (!game) return;
 
-      if (revealCount >= maxReveals || unrevealedIndexes.length === 0) {
-        updatedRound.endedAt = new Date();
-        await this.roundService.saveRound(updatedRound);
-
-        this.server.to(matchId).emit('roundEnded', {
-          winnerId: null,
-          roundId,
-          revealedWord: updatedRound.word,
-        });
-
-        clearInterval(interval);
-        this.tickIntervals.delete(roundId);
-        return;
+    // Give win to other player after grace period
+    setTimeout(() => {
+      const otherPlayer = game.players.find(p => p !== playerId);
+      if (otherPlayer) {
+        this.endRound(gameId, { winner: otherPlayer });
       }
+    }, 5000);
+  }
 
-      const indexToReveal =
-        unrevealedIndexes[Math.floor(Math.random() * unrevealedIndexes.length)];
-      updatedRound.revealedTiles[indexToReveal] = true;
-      revealCount++;
+  private shouldEndGame(game: any): boolean {
+    return game.roundNumber >= 5 || 
+           game.scores.player1 >= 3 || 
+           game.scores.player2 >= 3;
+  }
 
-      await this.roundService.saveRound(updatedRound);
-
-      this.server.to(matchId).emit('revealTile', {
-        index: indexToReveal,
-        letter: updatedRound.word[indexToReveal],
-      });
-
-      this.server.to(matchId).emit('tickStart', {
-        roundId,
-        revealedTiles: updatedRound.revealedTiles,
-      });
-    }, 5000); // Tick every 5 seconds
-
-    this.tickIntervals.set(roundId, interval);
+  private determineGameWinner(game: any): string | null {
+    if (game.scores.player1 > game.scores.player2) return 'player1';
+    if (game.scores.player2 > game.scores.player1) return 'player2';
+    return null; // Draw
   }
 }

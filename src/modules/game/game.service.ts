@@ -7,73 +7,245 @@ import { Match } from '../../entities/match.entity';
 import { Player } from '../../entities/player.entity';
 import { Round } from '../../entities/round.entity';
 import { Repository } from 'typeorm';
+import * as fs from 'fs';
+import * as path from 'path';
+import { Guess } from '../../entities/guess.entity';
 
 @Injectable()
 export class GameService {
   private lobbyQueue: { socket: Socket; playerId: string }[] = [];
   private logger: Logger = new Logger('GameService');
+  private lobby: string[] = [];
+  private games = new Map<string, any>();
+  private words: string[];
 
   constructor(
     @InjectRepository(Match)
-    private matchRepo: Repository<Match>,
+    private matchRepository: Repository<Match>,
 
     @InjectRepository(Player)
-    private playerRepo: Repository<Player>,
+    private playerRepository: Repository<Player>,
 
     @InjectRepository(Round)
-    private roundRepo: Repository<Round>,
-  ) {}
+    private roundRepository: Repository<Round>,
 
-  async addToLobby(socket: Socket, playerId: string) {
-  this.logger.log(`Player ${playerId} joined the lobby`);
-  this.lobbyQueue.push({ socket, playerId });
-
-  if (this.lobbyQueue.length >= 2) {
-    const [p1, p2] = this.lobbyQueue.splice(0, 2);
-
+    @InjectRepository(Guess)
+    private guessRepository: Repository<Guess>
+  ) {
     try {
-      const player1 = await this.playerRepo.findOneBy({ id: p1.playerId });
-      const player2 = await this.playerRepo.findOneBy({ id: p2.playerId });
-
-      if (!player1 || !player2) {
-        this.logger.error('One or both players not found in DB');
-        return;
+      // Try to load from src directory first (development)
+      let wordsPath = path.join(__dirname, '../../data/word.json');
+      
+      // If not found, try dist directory (production)
+      if (!fs.existsSync(wordsPath)) {
+        wordsPath = path.join(__dirname, '../../../src/data/word.json');
+      }
+      
+      if (!fs.existsSync(wordsPath)) {
+        throw new Error(`Could not find word.json at ${wordsPath}`);
       }
 
-      
-
-      const match = this.matchRepo.create({
-        player1,
-        player2,
-        status: 'ongoing',
-      });
-      await this.matchRepo.save(match);
-
-      const word = ' ';
-      const round = this.roundRepo.create({
-        match,
-        word,
-      });
-      await this.roundRepo.save(round);
-
-      p1.socket.emit('startRound', {
-        roundId: round.id,
-        wordLength: word.length,
-      });
-      p2.socket.emit('startRound', {
-        roundId: round.id,
-        wordLength: word.length,
-      });
-
-      this.logger.log(`Started match between ${p1.playerId} and ${p2.playerId}`);
+      const wordsData = JSON.parse(fs.readFileSync(wordsPath, 'utf8'));
+      this.words = wordsData.words;
     } catch (error) {
-      this.logger.error('Error starting match:', error);
+      console.error('Error loading words:', error);
+      // Fallback to a default word list if file can't be loaded
+      this.words = ['APPLE', 'BEACH', 'CLOUD', 'DREAM', 'EARTH'];
     }
   }
-}
+
+  async addToLobby(socket: Socket, playerId: string) {
+    this.logger.log(`Player ${playerId} joined the lobby`);
+    this.lobbyQueue.push({ socket, playerId });
+
+    if (this.lobbyQueue.length >= 2) {
+      const [p1, p2] = this.lobbyQueue.splice(0, 2);
+
+      try {
+        const player1 = await this.playerRepository.findOneBy({ id: p1.playerId });
+        const player2 = await this.playerRepository.findOneBy({ id: p2.playerId });
+
+        if (!player1 || !player2) {
+          this.logger.error('One or both players not found in DB');
+          return;
+        }
+
+        const match = this.matchRepository.create({
+          player1,
+          player2,
+          status: 'ongoing',
+        });
+        await this.matchRepository.save(match);
+
+        const word = ' ';
+        const round = this.roundRepository.create({
+          match,
+          word,
+        });
+        await this.roundRepository.save(round);
+
+        p1.socket.emit('startRound', {
+          roundId: round.id,
+          wordLength: word.length,
+        });
+        p2.socket.emit('startRound', {
+          roundId: round.id,
+          wordLength: word.length,
+        });
+
+        this.logger.log(`Started match between ${p1.playerId} and ${p2.playerId}`);
+      } catch (error) {
+        this.logger.error('Error starting match:', error);
+      }
+    }
+  }
+
+  async createPlayerIfNotExists(playerId: string) {
+    const existing = await this.playerRepository.findOne({ where: { id: playerId } });
+    if (!existing) {
+      const player = this.playerRepository.create({ id: playerId, username: `Guest-${playerId.slice(0, 8)}` });
+      await this.playerRepository.save(player);
+    }
+  }
 
   handleDisconnect(client: Socket) {
     this.lobbyQueue = this.lobbyQueue.filter(p => p.socket.id !== client.id);
     this.logger.warn(`Removed player from lobby due to disconnect: ${client.id}`);
+  }
+
+  async addPlayerToLobby(playerId: string): Promise<string | null> {
+    this.lobby.push(playerId);
+    
+    if (this.lobby.length >= 2) {
+      const gameId = uuidv4();
+      const players = this.lobby.splice(0, 2);
+      
+      // Create a new match in the database
+      const match = this.matchRepository.create({
+        player1: { id: players[0] },
+        player2: { id: players[1] },
+        status: 'ongoing'
+      });
+      await this.matchRepository.save(match);
+      
+      return gameId;
+    }
+    
+    return null;
+  }
+
+  async initializeGame(gameId: string) {
+    const word = this.getRandomWord();
+    const game = {
+      id: gameId,
+      word,
+      revealedTiles: new Array(word.length).fill(false),
+      roundNumber: 1,
+      status: 'active',
+      scores: {
+        player1: 0,
+        player2: 0
+      },
+      currentRound: uuidv4(),
+      players: [],
+      guesses: new Map()
+    };
+
+    this.games.set(gameId, game);
+    return game;
+  }
+
+  async processGuess(gameId: string, playerId: string, guess: string) {
+    const game = this.games.get(gameId);
+    if (!game || game.status !== 'active') {
+      return { error: 'Invalid game state' };
+    }
+
+    // Check if player already guessed this round
+    if (game.guesses.has(playerId)) {
+      return { error: 'Already submitted guess for this round' };
+    }
+
+    game.guesses.set(playerId, guess);
+
+    // Save guess to database
+    const round = await this.roundRepository.findOne({
+      where: { match: { id: gameId } }
+    });
+    
+    if (round) {
+      const guessEntity = this.guessRepository.create({
+        round: { id: round.id },
+        player: { id: playerId },
+        guess,
+        isCorrect: guess.toUpperCase() === game.word
+      });
+      await this.guessRepository.save(guessEntity);
+    }
+
+    // Check if guess is correct
+    if (guess.toUpperCase() === game.word) {
+      return {
+        winner: playerId,
+        revealedWord: game.word
+      };
+    }
+
+    return { status: 'guess recorded' };
+  }
+
+  async revealRandomTile(gameId: string) {
+    const game = this.games.get(gameId);
+    if (!game) return null;
+
+    const unrevealedIndices = game.revealedTiles
+      .map((revealed, index) => revealed ? -1 : index)
+      .filter(index => index !== -1);
+
+    if (unrevealedIndices.length === 0) {
+      return { isComplete: true };
+    }
+
+    const randomIndex = unrevealedIndices[Math.floor(Math.random() * unrevealedIndices.length)];
+    game.revealedTiles[randomIndex] = true;
+
+    return {
+      index: randomIndex,
+      letter: game.word[randomIndex],
+      isComplete: unrevealedIndices.length === 1
+    };
+  }
+
+  async endRound(gameId: string, result: any) {
+    const game = this.games.get(gameId);
+    if (!game) return;
+
+    if (result.winner) {
+      const playerIndex = game.players.indexOf(result.winner);
+      if (playerIndex === 0) {
+        game.scores.player1++;
+      } else {
+        game.scores.player2++;
+      }
+
+      // Update match score in database
+      const match = await this.matchRepository.findOne({
+        where: { id: gameId }
+      });
+      
+      if (match) {
+        match.score1 = game.scores.player1;
+        match.score2 = game.scores.player2;
+        await this.matchRepository.save(match);
+      }
+    }
+
+    game.roundNumber++;
+    game.currentRound = uuidv4();
+    game.guesses.clear();
+  }
+
+  private getRandomWord(): string {
+    return this.words[Math.floor(Math.random() * this.words.length)];
   }
 }
