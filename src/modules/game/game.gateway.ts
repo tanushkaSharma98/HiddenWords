@@ -52,14 +52,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.emit('error', { message: 'Player ID not found. Please refresh and try again.' });
       return;
     }
-    // Now use playerId (UUID) for all DB operations
-    const gameId = await this.gameService.addPlayerToLobby(playerId);
-    this.playerSockets.set(client.id, client);
-    
-    if (gameId) {
-      this.logger.log(`Two players matched! Starting game with gameId: ${gameId}`);
-      this.startGame(gameId);
-    }
+    // Pass both socket and playerId to the service
+    await this.gameService.addToLobby(client, playerId, this.server);
   }
 
   @SubscribeMessage('joinMatch')

@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Socket } from 'socket.io';
+import { Socket, Server } from 'socket.io';
 import { v4 as uuidv4 } from 'uuid';
 import { JoinLobbyPayload } from './types';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -54,55 +54,57 @@ export class GameService {
     }
   }
 
-  async addToLobby(socket: Socket, playerId: string) {
+  async addToLobby(socket: Socket, playerId: string, server: Server): Promise<string | null> {
     this.logger.log(`Player ${playerId} joined the lobby`);
     this.lobbyQueue.push({ socket, playerId });
 
     if (this.lobbyQueue.length >= 2) {
       const [p1, p2] = this.lobbyQueue.splice(0, 2);
 
-      try {
-        const player1 = await this.playerRepository.findOneBy({ id: p1.playerId });
-        const player2 = await this.playerRepository.findOneBy({ id: p2.playerId });
+      // Ensure both players exist in DB
+      await this.createPlayerIfNotExists(p1.playerId);
+      await this.createPlayerIfNotExists(p2.playerId);
 
-        if (!player1 || !player2) {
-          this.logger.error('One or both players not found in DB');
-          return;
-        }
+      // Create match in DB
+      const match = this.matchRepository.create({
+        player1: { id: p1.playerId },
+        player2: { id: p2.playerId },
+        status: 'ongoing',
+      });
+      await this.matchRepository.save(match);
 
-        const match = this.matchRepository.create({
-          player1,
-          player2,
-          status: 'ongoing',
-        });
-        await this.matchRepository.save(match);
+      // Create round in DB
+      const word = this.getRandomWord();
+      const round = this.roundRepository.create({
+        match,
+        word,
+        revealedTiles: new Array(word.length).fill(false),
+        roundNumber: 1,
+      });
+      await this.roundRepository.save(round);
 
-        const word = ' ';
-        const round = this.roundRepository.create({
-          match,
-          word,
-        });
-        await this.roundRepository.save(round);
+      // Both sockets join the game room
+      p1.socket.join(match.id);
+      p2.socket.join(match.id);
 
-        p1.socket.emit('startRound', {
-          roundId: round.id,
-          wordLength: word.length,
-        });
-        p2.socket.emit('startRound', {
-          roundId: round.id,
-          wordLength: word.length,
-        });
+      // Emit gameStart to both players in the room
+      server.to(match.id).emit('gameStart', {
+        gameId: match.id,
+        wordLength: word.length,
+        roundId: round.id,
+      });
 
-        this.logger.log(`Started match between ${p1.playerId} and ${p2.playerId}`);
-      } catch (error) {
-        this.logger.error('Error starting match:', error);
-      }
+      this.logger.log(`Started match between ${p1.playerId} and ${p2.playerId} (gameId: ${match.id})`);
+      return match.id;
     }
+    return null;
   }
 
   async createPlayerIfNotExists(playerId: string) {
+    this.logger.log(`Checking/creating player in DB: ${playerId}`);
     const existing = await this.playerRepository.findOne({ where: { id: playerId } });
     if (!existing) {
+      this.logger.log(`Creating new player in DB: ${playerId}`);
       const player = this.playerRepository.create({ id: playerId, username: `Guest-${playerId.slice(0, 8)}` });
       await this.playerRepository.save(player);
     }
