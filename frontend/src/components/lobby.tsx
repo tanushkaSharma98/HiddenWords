@@ -1,39 +1,66 @@
 import React, { useEffect, useState } from 'react';
-import socket from '../lib/socket';
+import { io, Socket } from 'socket.io-client';
 import { useRouter } from 'next/router';
 
-const Lobby = () => {
-  const [playerId] = useState(() => crypto.randomUUID());
-  const [joined, setJoined] = useState(false);
+interface LobbyProps {
+
+  onGameStart: (gameId: string) => void;
+}
+
+export default function Lobby({ onGameStart }: LobbyProps) {
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [status, setStatus] = useState<'idle' | 'waiting' | 'matched'>('idle');
+  const [error, setError] = useState<string | null>(null);
   const router = useRouter();
 
-  const handleJoin = () => {
-    socket.emit('joinLobby', { playerId });
-    setJoined(true);
-  };
-
   useEffect(() => {
-    socket.on('waitingForOpponent', () => {
-      console.log('Waiting for opponent...');
+    // Initialize socket connection
+    const newSocket = io('http://localhost:5000', {
+      transports: ['websocket'],
+      autoConnect: true
     });
 
-    socket.on('matchStarted', (data) => {
-      console.log('Match Started:', data);
-      router.push({
-        pathname: '/room',
-        query: {
-          matchId: data.matchId,
-          roundId: data.firstRound.roundId,
-          playerId,
-        },
-      });
+    newSocket.on('connect', () => {
+      console.log('Socket connected:', newSocket.id);
+      setError(null);
     });
 
+    newSocket.on('connect_error', (err) => {
+      console.error('Connection error:', err);
+      setError('Failed to connect to server');
+    });
+
+    newSocket.on('gameStart', (data) => {
+      console.log('Game starting:', data);
+      setStatus('matched');
+      onGameStart(data.gameId);
+
+      const playerId = localStorage.getItem('playerId'); // or however you store it
+  router.push(`/room?matchId=${data.gameId}&playerId=${playerId}`);
+    });
+
+    newSocket.on('playerId', ({ playerId }) => {
+      localStorage.setItem('playerId', playerId);
+    });
+
+    setSocket(newSocket);
+
+    // Cleanup on unmount
     return () => {
-      socket.off('waitingForOpponent');
-      socket.off('matchStarted');
+      newSocket.close();
     };
-  }, [playerId]);
+  }, [onGameStart]);
+
+  const handleJoinLobby = () => {
+    if (!socket) {
+      setError('Not connected to server');
+      return;
+    }
+
+    setStatus('waiting');
+    socket.emit('joinLobby');
+    console.log('Emitted joinLobby');
+  };
 
   return (
     <div className="min-h-screen bg-[#FFE6E6] relative overflow-hidden">
@@ -53,17 +80,31 @@ const Lobby = () => {
             Are You Ready?
           </p>
 
-          {!joined ? (
+          {error && (
+            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+              {error}
+            </div>
+          )}
+
+          {status === 'idle' && (
             <button
-              onClick={handleJoin}
+              onClick={handleJoinLobby}
               className="relative px-16 py-6 text-3xl font-bold text-[#FF4B4B] bg-[#FFE4A3] rounded-full shadow-lg hover:shadow-xl transition-all duration-300 hover:scale-105 border-4 border-[#FFD166]"
             >
               JOIN LOBBY
             </button>
-          ) : (
-            <div className="flex items-center justify-center space-x-3 text-2xl text-[#8B5CF6] animate-pulse">
-              <div className="w-3 h-3 bg-[#8B5CF6] rounded-full"></div>
-              <p>Waiting for opponent...</p>
+          )}
+
+          {status === 'waiting' && (
+            <div className="text-center">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+              <p className="text-gray-600">Waiting for opponent...</p>
+            </div>
+          )}
+
+          {status === 'matched' && (
+            <div className="text-center">
+              <p className="text-green-600 font-semibold">Game starting!</p>
             </div>
           )}
         </div>
@@ -87,6 +128,4 @@ const Lobby = () => {
       <p className="absolute top-4 right-6 text-sm text-[#8B5CF6] font-semibold"></p>
     </div>
   );
-};
-
-export default Lobby;
+}
