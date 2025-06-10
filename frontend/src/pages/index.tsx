@@ -1,2 +1,8 @@
 import Lobby from '../components/lobby';
-export default Lobby;
+
+
+export default function HomePage() {
+  return (
+    <Lobby onGameStart={() => {}} />
+  );
+}
