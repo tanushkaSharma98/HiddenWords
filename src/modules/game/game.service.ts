@@ -250,4 +250,11 @@ export class GameService {
   private getRandomWord(): string {
     return this.words[Math.floor(Math.random() * this.words.length)];
   }
+
+  async getMatch(matchId: string) {
+    return this.matchRepository.findOne({
+      where: { id: matchId },
+      relations: ['player1', 'player2']
+    });
+  }
 }
