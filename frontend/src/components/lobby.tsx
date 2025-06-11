@@ -3,8 +3,18 @@ import { io, Socket } from 'socket.io-client';
 import { useRouter } from 'next/router';
 
 interface LobbyProps {
-
   onGameStart: (gameId: string) => void;
+}
+
+interface Player {
+  id: string;
+  socketId: string;
+}
+
+interface MatchData {
+  matchId: string;
+  player1: Player;
+  player2: Player;
 }
 
 export default function Lobby({ onGameStart }: LobbyProps) {
@@ -30,17 +40,35 @@ export default function Lobby({ onGameStart }: LobbyProps) {
       setError('Failed to connect to server');
     });
 
-    newSocket.on('gameStart', (data) => {
-      console.log('Game starting:', data);
-      setStatus('matched');
-      onGameStart(data.gameId);
-
-      const playerId = localStorage.getItem('playerId'); // or however you store it
-  router.push(`/room?matchId=${data.gameId}&playerId=${playerId}`);
-    });
-
     newSocket.on('playerId', ({ playerId }) => {
       localStorage.setItem('playerId', playerId);
+    });
+
+    // newSocket.on('waitingRoomCreated', (data: MatchData) => {
+    //   console.log('Waiting room created:', data);
+    newSocket.on('waitingRoomCreated', (data: MatchData) => {
+      // Save match data to localStorage
+      localStorage.setItem('matchData', JSON.stringify(data));
+      localStorage.setItem('matchId', data.matchId);
+      localStorage.setItem('player1Id', data.player1.id);
+      localStorage.setItem('player2Id', data.player2.id);
+    
+      setStatus('matched');
+      router.push(`/room?matchId=${data.matchId}`);
+    });
+      
+    //   // Store match data in localStorage
+    //   localStorage.setItem('matchId', data.matchId);
+    //   localStorage.setItem('player1Id', data.player1.id);
+    //   localStorage.setItem('player2Id', data.player2.id);
+      
+    //   // Navigate to game room
+    //   router.push(`/room?matchId=${data.matchId}`);
+    // });
+
+    newSocket.on('gameStarting', (data) => {
+      console.log('Game starting:', data);
+      onGameStart(data.matchId);
     });
 
     setSocket(newSocket);
@@ -49,7 +77,7 @@ export default function Lobby({ onGameStart }: LobbyProps) {
     return () => {
       newSocket.close();
     };
-  }, [onGameStart]);
+  }, [onGameStart, router]);
 
   const handleJoinLobby = () => {
     if (!socket) {
