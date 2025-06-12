@@ -219,42 +219,77 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('submitGuess')
-  async handleGuess(client: Socket, payload: { gameId: string; guess: string }) {
-    const { gameId, guess } = payload;
+  async handleGuess(client: Socket, payload: { gameId: string; guess: string; timestamp: number }) {
+    const { gameId, guess, timestamp } = payload;
     const game = this.activeGames.get(gameId);
-    
     if (!game || game.status !== 'active') {
       return { error: 'Invalid game state' };
     }
-
-    const result = await this.gameService.processGuess(gameId, client.id, guess);
-    if (result.winner) {
-      this.endRound(gameId, result);
+    if (game.tickStatus !== 'in-progress') {
+      return { error: 'Guesses are locked for this tick' };
     }
-    
-    return result;
+    if (!game.tickGuesses) game.tickGuesses = new Map();
+    const tickDuration = 5000;
+    if (!timestamp || timestamp - game.tickStartTime > tickDuration) {
+      return { error: 'Late submission' };
+    }
+    // Allow multiple guesses per tick, always store the latest
+    game.tickGuesses.set(client.id, { guess, tick: game.currentTick });
+    // Emit guessUpdate to both players
+    this.server.to(gameId).emit('guessUpdate', Array.from(game.tickGuesses.entries()).map(([pid, g]) => ({ playerId: pid, guess: g.guess })));
+
+    // Check for correct guess
+    const correctPlayers = Array.from(game.tickGuesses.entries())
+      .filter(([_, g]) => g.guess.trim().toUpperCase() === game.word)
+      .map(([pid, _]) => pid);
+    if (correctPlayers.length > 0) {
+      // End the round immediately
+      game.tickStatus = 'ended';
+      if (game.tickTimer) clearTimeout(game.tickTimer);
+      let winner = null;
+      if (correctPlayers.length === 1) {
+        winner = correctPlayers[0];
+      } // else draw (winner stays null)
+      this.endRound(gameId, { winner, revealedWord: game.word });
+      return { status: 'winner', winner, revealedWord: game.word };
+    }
+    return { status: 'guess recorded' };
   }
 
   private startTick(gameId: string) {
     const game = this.activeGames.get(gameId);
     if (!game) return;
 
-    this.server.to(gameId).emit('tickStart', {
-      gameId,
-      timeRemaining: 5000 // 5 seconds
-    });
+    // Initialize tick state
+    if (typeof game.currentTick !== 'number') game.currentTick = 1;
+    else game.currentTick++;
+    game.tickStatus = 'in-progress';
+    game.tickGuesses = new Map();
+    game.tickStartTime = Date.now(); // Store tick start time
 
-    setTimeout(() => {
+    // Save timer so we can clear it if needed
+    if (game.tickTimer) clearTimeout(game.tickTimer);
+    game.tickTimer = setTimeout(() => {
       this.endTick(gameId);
     }, 5000);
+
+    this.server.to(gameId).emit('tickStart', {
+      gameId,
+      tick: game.currentTick,
+      timeRemaining: 5000,
+      revealedTiles: game.revealedTiles,
+      serverTime: game.tickStartTime
+    });
   }
 
   private async endTick(gameId: string) {
     const game = this.activeGames.get(gameId);
     if (!game) return;
 
+    game.tickStatus = 'waiting'; // Lock guesses after tick
+
+    // Reveal a random tile if no winner
     const revealedTile = await this.gameService.revealRandomTile(gameId);
-    
     if (!revealedTile) {
       this.logger.error(`Failed to reveal tile for game ${gameId}`);
       return;
@@ -286,22 +321,22 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       scores: game.scores
     });
 
-    // Start next round or end game
+    // Start next round or end game after a short delay
     if (this.shouldEndGame(game)) {
-      this.endGame(gameId);
+      setTimeout(() => this.endGame(gameId), 3000);
     } else {
-      // Start next round
-      const newGame = await this.gameService.initializeGame(gameId);
-      this.activeGames.set(gameId, newGame);
-      
-      this.server.to(gameId).emit('gameStart', {
-        gameId,
-        wordLength: newGame.word.length,
-        roundId: newGame.currentRound
-      });
-
-      setTimeout(() => {
-        this.startTick(gameId);
+      setTimeout(async () => {
+        // Start next round
+        const newGame = await this.gameService.initializeGame(gameId);
+        this.activeGames.set(gameId, newGame);
+        this.server.to(gameId).emit('gameStart', {
+          gameId,
+          wordLength: newGame.word.length,
+          roundId: newGame.currentRound
+        });
+        setTimeout(() => {
+          this.startTick(gameId);
+        }, 3000);
       }, 3000);
     }
   }
