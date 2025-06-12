@@ -12,7 +12,17 @@ import PuzzleCard from '../components/PuzzleCard';
 
 export default function Match() {
   const router = useRouter();
-  const { matchId, playerId } = router.query;
+  const { matchId } = router.query;
+  // Get playerId from query or localStorage
+  const [playerId, setPlayerId] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (router.query.playerId) setPlayerId(router.query.playerId as string);
+    else if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('playerId');
+      if (stored) setPlayerId(stored);
+    }
+  }, [router.query.playerId]);
+
   const socket = useSocket();
 
   // Dynamic state
@@ -23,8 +33,9 @@ export default function Match() {
   const [guesses, setGuesses] = useState<{ player1: string[]; player2: string[] }>({ player1: [], player2: [] });
   const [word, setWord] = useState('');
   const [revealedTiles, setRevealedTiles] = useState<boolean[]>([]);
-  const [players, setPlayers] = useState<{ id: string; name: string; avatar: string }[]>([]);
+  const [players, setPlayers] = useState<{ id: string; name?: string; avatar?: string }[]>([]);
   const [guessInput, setGuessInput] = useState('');
+  const [winner, setWinner] = useState<string | null>(null);
 
   // Helper to get opponent ID
   const opponentId = players.find(p => p.id !== playerId)?.id;
@@ -42,23 +53,27 @@ export default function Match() {
     socket.on('gameStart', (data) => {
       setWord('');
       setRevealedTiles(new Array(data.wordLength).fill(false));
-      setRound(1);
+      setRound(data.roundNumber || 1);
       setMaxRounds(data.maxRounds || 5);
       setPlayers(data.players || []);
       setGuesses({ player1: [], player2: [] });
+      setScore(data.scores || { player1: 0, player2: 0 });
+      setWinner(null);
     });
     socket.on('tickStart', (data) => {
       console.log('Tick start:', data);
       setTimer(Math.floor(data.timeRemaining / 1000));
       setRevealedTiles(data.revealedTiles);
+      if (data.players) setPlayers(data.players);
+      if (data.scores) setScore(data.scores);
+      if (data.roundNumber) setRound(data.roundNumber);
     });
-    socket.on('revealTile', ({ index, letter }) => {
-      console.log('Tile revealed:', index);
-      setRevealedTiles((prev) => {
-        const updated = [...prev];
-        updated[index] = true;
-        return updated;
-      });
+    socket.on('revealTile', (data) => {
+      console.log('Tile revealed:', data);
+      setRevealedTiles(data.revealedTiles);
+      if (data.players) setPlayers(data.players);
+      if (data.scores) setScore(data.scores);
+      if (data.roundNumber) setRound(data.roundNumber);
     });
     socket.on('gameState', (data) => {
       console.log('Game state:', data);
@@ -69,20 +84,28 @@ export default function Match() {
       setMaxRounds(data.maxRounds || 5);
       setPlayers(data.players || []);
       setGuesses(data.guesses || { player1: [], player2: [] });
+      setWinner(null);
     });
     socket.on('guessUpdate', (data) => {
       console.log('Guess update:', data);
-      setGuesses(data);
+      if (data.players) setPlayers(data.players);
+      if (data.guesses) setGuesses(data.guesses);
     });
     socket.on('roundEnd', (data) => {
       console.log('Round end:', data);
       setScore(data.scores);
-      setRound((prev) => prev + 1);
+      setRound(data.roundNumber || (prev => prev + 1));
       setTimer(10);
+      if (data.players) setPlayers(data.players);
+      if (data.guesses) setGuesses(data.guesses);
+      if (data.winner) setWinner(data.winner);
     });
     socket.on('gameEnd', (data) => {
       console.log('Game end:', data);
-      // Optionally show winner, etc.
+      setWinner(data.winner);
+      setScore(data.finalScores || score);
+      if (data.players) setPlayers(data.players);
+      if (data.roundNumber) setRound(data.roundNumber);
     });
 
     return () => {
@@ -122,8 +145,8 @@ export default function Match() {
   };
 
   // Helper to determine if current player is player1 or player2
-  const isPlayer1 = players.length > 0 && players[0].id === playerId;
-  const isPlayer2 = players.length > 1 && players[1].id === playerId;
+  const isPlayer1 = players.length > 0 && players[0]?.id === playerId;
+  const isPlayer2 = players.length > 1 && players[1]?.id === playerId;
 
   // Guess submission with timestamp
   const handleGuessSubmit = () => {
@@ -174,6 +197,14 @@ export default function Match() {
         <div className="text-xs text-gray-700 bg-white rounded px-3 py-1 shadow">Your ID: {playerId}</div>
         {opponentId && <div className="text-xs text-gray-700 bg-white rounded px-3 py-1 shadow">Opponent ID: {opponentId}</div>}
       </div>
+      {/* Winner display */}
+      {winner && (
+        <div className="flex justify-center mt-4">
+          <div className="bg-green-200 text-green-800 font-bold px-6 py-2 rounded-lg shadow">
+            {winner === playerId ? 'You win!' : winner === 'player1' || winner === 'player2' ? `${winner} wins!` : 'Draw!'}
+          </div>
+        </div>
+      )}
       {/* Main Content */}
       <main className="flex-1 flex flex-row items-stretch justify-center px-4 py-8 gap-8">
         {/* Left: Score and Player 1 Guesses */}
@@ -244,7 +275,7 @@ export default function Match() {
             <div className="text-xl font-bold text-[#FF4B4B] mb-2">Time:</div>
             <div className="text-3xl font-extrabold text-[#2D2A32] mb-4">{timer}s</div>
             <div className="text-lg font-bold text-[#FF4B4B] mb-2">Round:</div>
-            <div className="text-xl font-semibold text-[#8B5CF6] mb-4">{`0${round}/${maxRounds}`}</div>
+            <div className="text-xl font-semibold text-[#8B5CF6] mb-4">{`${round.toString().padStart(2, '0')}/${maxRounds}`}</div>
           </div>
           <div className="w-full">
             <div className="text-lg font-bold text-[#FF4B4B] mb-2 text-right">Player 2 guesses:</div>
