@@ -1,45 +1,20 @@
 import React from 'react';
-import Image from 'next/image';
 
-const PuzzleCard = () => {
-  return (
-    <div className="relative w-full max-w-md p-6 bg-lime-200 rounded-2xl text-center shadow-lg">
-      <h2 className="text-xl font-bold text-purple-900 mb-2">FILL IN THE BLANK</h2>
-      <p className="text-sm text-purple-800 font-semibold mb-6 uppercase">One of the small dog breeds</p>
-
-      <div className="flex justify-center space-x-3 mb-4">
-        <span className="text-lg font-bold text-purple-900">P</span>
-        <span className="text-lg font-bold text-purple-900">_</span>
-        <span className="text-lg font-bold text-purple-900">_</span>
-        <span className="text-lg font-bold text-purple-900">E</span>
-        <span className="text-lg font-bold text-purple-900">_</span>
-        <span className="text-lg font-bold text-purple-900">A</span>
-      </div>
-
-      <div className="flex justify-center space-x-3 mb-4">
-        <span className="text-lg font-bold text-purple-900">N</span>
-        <span className="text-lg font-bold text-purple-900">_</span>
-        <span className="text-lg font-bold text-purple-900">A</span>
-        <span className="text-lg font-bold text-purple-900">N</span>
-        <span className="text-lg font-bold text-purple-900">_</span>
-      </div>
-
-      <Image
-        src="/dog-left.png"
-        alt="Dog Left"
-        width={60}
-        height={60}
-        className="absolute bottom-3 left-3"
-      />
-      <Image
-        src="/dog-right.png"
-        alt="Dog Right"
-        width={60}
-        height={60}
-        className="absolute bottom-3 right-3"
-      />
+const PuzzleCard = () => (
+  <div className="flex flex-col items-center justify-center bg-[#FFE4A3] rounded-xl shadow-lg p-8">
+    <div className="text-xl font-bold text-[#222] mb-1">Word Guess</div>
+    <div className="text-xs text-[#444] mb-4 tracking-wide">FILL IN THE MISSING LETTER</div>
+    <div className="flex gap-2">
+      {[...Array(6)].map((_, idx) => (
+        <div
+          key={idx}
+          className="w-12 h-14 sm:w-14 sm:h-16 flex items-center justify-center text-3xl font-bold border-2 border-gray-300 rounded-md bg-[#f5f3ee] shadow-sm"
+        >
+          {/* Empty for now */}
+        </div>
+      ))}
     </div>
-  );
-};
+  </div>
+);
 
 export default PuzzleCard;
