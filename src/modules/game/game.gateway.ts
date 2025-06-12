@@ -108,82 +108,114 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-
-
   @SubscribeMessage('joinMatch')
   async handleJoinMatch(client: Socket, { matchId, playerId }) {
     this.logger.log(`Player ${playerId} joining match ${matchId}`);
     client.join(matchId);
 
-  // Get the waiting room data
-  const waitingRoom = this.waitingRooms.get(matchId);
-  let player1Id, player2Id;
-  if (waitingRoom) {
-    player1Id = waitingRoom.player1;
-    player2Id = waitingRoom.player2;
-  } else {
-    // Fallback: try to get from DB if not in memory
-    const match = await this.gameService.getMatch(matchId);
-    if (match) {
-      player1Id = match.player1.id;
-      player2Id = match.player2.id;
+    // Add this log:
+    this.logger.log(`Current waitingRooms: ${JSON.stringify(Array.from(this.waitingRooms.entries()))}`);
+
+    // Get the waiting room data
+    const waitingRoom = this.waitingRooms.get(matchId);
+    let player1Id, player2Id;
+    if (waitingRoom) {
+      player1Id = waitingRoom.player1;
+      player2Id = waitingRoom.player2;
+    } else {
+      // Fallback: try to get from DB if not in memory
+      const match = await this.gameService.getMatch(matchId);
+      if (match) {
+        player1Id = match.player1.id;
+        player2Id = match.player2.id;
+      }
     }
-  }
 
-  if (player1Id && player2Id) {
-    // Emit waitingRoomCreated event to all players in the room
-    this.server.to(matchId).emit('waitingRoomCreated', {
-      matchId,
-      player1: { id: player1Id, socketId: this.playerSockets.get(player1Id)?.id || null },
-      player2: { id: player2Id, socketId: this.playerSockets.get(player2Id)?.id || null }
-    });
+    if (player1Id && player2Id) {
+      // Emit waitingRoomCreated event to all players in the room
+      this.server.to(matchId).emit('waitingRoomCreated', {
+        matchId,
+        player1: { id: player1Id, socketId: this.playerSockets.get(player1Id)?.id || null },
+        player2: { id: player2Id, socketId: this.playerSockets.get(player2Id)?.id || null }
+      });
 
-    // Notify other players in the room
-    client.emit('playerJoined', { 
-      playerId,
-      isPlayer1: player1Id === playerId,
-      isPlayer2: player2Id === playerId
-    });
-
-    const otherPlayerId = player1Id === playerId ? player2Id : player1Id;
-    const otherSocket = this.playerSockets.get(otherPlayerId);
-    if (otherSocket) {
-      otherSocket.emit('playerJoined', { 
+      // Notify other players in the room
+      client.emit('playerJoined', { 
         playerId,
         isPlayer1: player1Id === playerId,
         isPlayer2: player2Id === playerId
       });
+
+      const otherPlayerId = player1Id === playerId ? player2Id : player1Id;
+      const otherSocket = this.playerSockets.get(otherPlayerId);
+      if (otherSocket) {
+        otherSocket.emit('playerJoined', { 
+          playerId,
+          isPlayer1: player1Id === playerId,
+          isPlayer2: player2Id === playerId
+        });
+      }
     }
   }
-}
-  
+
   @SubscribeMessage('startGame')
   async handleStartGame(client: Socket, { matchId }: { matchId: string }) {
+    this.logger.log(`Start game request received for match ${matchId} from socket ${client.id}`);
+    
     const playerId = this.socketToPlayer.get(client.id);
     if (!playerId) {
+      this.logger.error(`No playerId found for socket ${client.id}`);
       client.emit('error', { message: 'Player ID not found' });
       return;
     }
+    this.logger.log(`Player ${playerId} starting game`);
 
-    const waitingRoom = this.waitingRooms.get(matchId);
-    if (!waitingRoom) {
-      client.emit('error', { message: 'Waiting room not found' });
-      return;
+    // Remove waitingRooms check and always start the game
+    try {
+      // Get player1 and player2 from DB or another method
+      const match = await this.gameService.getMatch(matchId);
+      let player1Id: string | null = null, player2Id: string | null = null;
+      if (match) {
+        player1Id = match.player1.id;
+        player2Id = match.player2.id;
+      }
+      this.logger.log(`Starting game for match ${matchId} with players:`, { player1Id, player2Id });
+
+      // Initialize the game
+      this.logger.log(`Initializing game for match ${matchId}`);
+      const game = await this.gameService.initializeGame(matchId);
+      this.activeGames.set(matchId, game);
+      
+      // Emit gameStart event with the game data
+      this.logger.log(`Emitting gameStart to match ${matchId} with game data:`, {
+        gameId: matchId,
+        wordLength: game.word.length,
+        roundId: game.currentRound,
+        players: [
+          { id: player1Id },
+          { id: player2Id }
+        ]
+      });
+      
+      this.server.to(matchId).emit('gameStart', {
+        gameId: matchId,
+        wordLength: game.word.length,
+        roundId: game.currentRound,
+        players: [
+          { id: player1Id },
+          { id: player2Id }
+        ]
+      });
+
+      // Start the first tick after a short delay
+      this.logger.log(`Scheduling first tick for match ${matchId}`);
+      setTimeout(() => {
+        this.startTick(matchId);
+      }, 3000);
+    } catch (error) {
+      this.logger.error(`Failed to start game for match ${matchId}:`, error);
+      this.server.to(matchId).emit('error', { message: 'Failed to start game' });
     }
-
-    // Notify all players in the match that the game is starting
-    this.server.to(matchId).emit('gameStarting', { 
-      matchId,
-      startedBy: playerId
-    });
-    
-    // Remove from waiting rooms
-    this.waitingRooms.delete(matchId);
-    
-    // Start the game after a short delay
-    setTimeout(() => {
-      this.startGame(matchId);
-    }, 3000);
   }
 
   @SubscribeMessage('submitGuess')
@@ -201,22 +233,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     
     return result;
-  }
-
-  private async startGame(gameId: string) {
-    const game = await this.gameService.initializeGame(gameId);
-    this.activeGames.set(gameId, game);
-    
-    // Notify both players
-    this.logger.log(`Emitting gameStart to gameId: ${gameId}`);
-    this.server.to(gameId).emit('gameStart', {
-      gameId,
-      wordLength: game.word.length,
-      roundId: game.currentRound
-    });
-
-    // Start the first tick
-    this.startTick(gameId);
   }
 
   private startTick(gameId: string) {
@@ -274,7 +290,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (this.shouldEndGame(game)) {
       this.endGame(gameId);
     } else {
-      this.startGame(gameId);
+      // Start next round
+      const newGame = await this.gameService.initializeGame(gameId);
+      this.activeGames.set(gameId, newGame);
+      
+      this.server.to(gameId).emit('gameStart', {
+        gameId,
+        wordLength: newGame.word.length,
+        roundId: newGame.currentRound
+      });
+
+      setTimeout(() => {
+        this.startTick(gameId);
+      }, 3000);
     }
   }
 
