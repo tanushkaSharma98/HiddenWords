@@ -174,7 +174,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
   }
-
+  
   @SubscribeMessage('startGame')
   async handleStartGame(client: Socket, { matchId }: { matchId: string }) {
     this.logger.log(`Start game request received for match ${matchId} from socket ${client.id}`);
@@ -199,8 +199,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (!player1Id || !player2Id) {
         this.logger.error(`Missing player IDs for match ${matchId}`);
         this.server.to(matchId).emit('error', { message: 'Missing player IDs' });
-        return;
-      }
+      return;
+    }
       this.logger.log(`Starting game for match ${matchId} with players:`, { player1Id, player2Id });
 
       // Initialize the game
@@ -223,6 +223,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
       this.server.to(matchId).emit('gameStart', {
         gameId: matchId,
+        word: game.word,
         wordLength: game.word.length,
         roundId: game.currentRound,
         players: [
@@ -233,12 +234,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         roundNumber: game.roundNumber,
         revealedTiles: game.revealedTiles
       });
-
-      // Start the first tick after a short delay
-      this.logger.log(`Scheduling first tick for match ${matchId}`);
+      // Start the first round
       setTimeout(() => {
-        this.startTick(matchId);
-      }, 3000);
+        this.startRound(matchId);
+      }, 1000);
     } catch (error) {
       this.logger.error(`Failed to start game for match ${matchId}:`, error);
       this.server.to(matchId).emit('error', { message: 'Failed to start game' });
@@ -253,17 +252,17 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return { error: 'Invalid game state' };
     }
     if (game.tickStatus !== 'in-progress') {
-      return { error: 'Guesses are locked for this tick' };
+      return { error: 'Guesses are locked for this round' };
     }
     if (!game.tickGuesses) game.tickGuesses = new Map();
-    const tickDuration = 5000;
-    if (!timestamp || timestamp - game.tickStartTime > tickDuration) {
+    if (!game.roundTimer) return { error: 'No round timer' };
+    if (!timestamp || timestamp - game.tickStartTime > 10000) {
       return { error: 'Late submission' };
     }
     // Map socket ID to player ID
     const playerId = this.socketToPlayer.get(client.id);
     if (!playerId) return { error: 'Player not found' };
-    // Allow multiple guesses per tick, always store the latest
+    // Allow multiple guesses per round, always store the latest
     game.tickGuesses.set(playerId, { guess, tick: game.currentTick });
     // Map guesses to { player1: [...], player2: [...] }
     const player1Id = game.players[0];
@@ -288,7 +287,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (correctPlayers.length > 0) {
       // End the round immediately
       game.tickStatus = 'ended';
-      if (game.tickTimer) clearTimeout(game.tickTimer);
+      if (game.roundTimer) clearTimeout(game.roundTimer);
       let winner = null;
       if (correctPlayers.length === 1) {
         winner = correctPlayers[0];
@@ -296,32 +295,49 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.endRound(gameId, { winner, revealedWord: game.word });
       return { status: 'winner', winner, revealedWord: game.word };
     }
+
+    // Reveal a random tile after every guess (if not complete)
+    const revealedTile = await this.gameService.revealRandomTile(gameId);
+    if (revealedTile) {
+      this.server.to(gameId).emit('revealTile', {
+        gameId,
+        index: revealedTile.index,
+        letter: revealedTile.letter,
+        word: game.word,
+        players: [
+          { id: player1Id },
+          { id: player2Id }
+        ],
+        revealedTiles: game.revealedTiles,
+        scores: game.scores,
+        roundNumber: game.roundNumber
+      });
+      if (revealedTile.isComplete) {
+        game.tickStatus = 'ended';
+        if (game.roundTimer) clearTimeout(game.roundTimer);
+        this.endRound(gameId, { winner: null, revealedWord: game.word });
+      }
+    }
     return { status: 'guess recorded' };
   }
 
-  private startTick(gameId: string) {
+  // New: Start a round with a 10s timer
+  private startRound(gameId: string) {
     const game = this.activeGames.get(gameId);
     if (!game) return;
-
-    // Initialize tick state
-    if (typeof game.currentTick !== 'number') game.currentTick = 1;
-    else game.currentTick++;
+    game.roundTimer && clearTimeout(game.roundTimer);
     game.tickStatus = 'in-progress';
     game.tickGuesses = new Map();
-    game.tickStartTime = Date.now(); // Store tick start time
-
-    // Save timer so we can clear it if needed
-    if (game.tickTimer) clearTimeout(game.tickTimer);
-    game.tickTimer = setTimeout(() => {
-      this.endTick(gameId);
-    }, 5000);
-
+    game.tickStartTime = Date.now();
+    // 10s round timer
+    game.roundTimer = setTimeout(() => {
+      this.endRound(gameId, { winner: null, revealedWord: game.word });
+    }, 10000);
     this.server.to(gameId).emit('tickStart', {
       gameId,
-      tick: game.currentTick,
-      timeRemaining: 5000,
+      timeRemaining: 10000,
+      word: game.word,
       revealedTiles: game.revealedTiles,
-      serverTime: game.tickStartTime,
       players: [
         { id: game.players[0] },
         { id: game.players[1] }
@@ -329,45 +345,12 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       scores: game.scores,
       roundNumber: game.roundNumber
     });
-  }
-
-  private async endTick(gameId: string) {
-    const game = this.activeGames.get(gameId);
-    if (!game) return;
-
-    game.tickStatus = 'waiting'; // Lock guesses after tick
-
-    // Reveal a random tile if no winner
-    const revealedTile = await this.gameService.revealRandomTile(gameId);
-    if (!revealedTile) {
-      this.logger.error(`Failed to reveal tile for game ${gameId}`);
-      return;
-    }
-
-    this.server.to(gameId).emit('revealTile', {
-      gameId,
-      index: revealedTile.index,
-      letter: revealedTile.letter,
-      players: [
-        { id: game.players[0] },
-        { id: game.players[1] }
-      ],
-      revealedTiles: game.revealedTiles,
-      scores: game.scores,
-      roundNumber: game.roundNumber
-    });
-
-    if (revealedTile.isComplete) {
-      this.endRound(gameId, { winner: null, revealedWord: game.word });
-    } else {
-      this.startTick(gameId);
-    }
   }
 
   private async endRound(gameId: string, result: any) {
     const game = this.activeGames.get(gameId);
     if (!game) return;
-
+    if (game.roundTimer) clearTimeout(game.roundTimer);
     await this.gameService.endRound(gameId, result);
     // Map guesses to { player1: [...], player2: [...] }
     const player1Id = game.players[0];
@@ -383,16 +366,17 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       gameId,
       winner: result.winner,
       revealedWord: result.revealedWord,
+      word: game.word,
       scores: game.scores,
       guesses: guessesObj,
       players: [
         { id: player1Id },
         { id: player2Id }
       ],
-      roundNumber: game.roundNumber
+      roundNumber: game.roundNumber,
+      revealedTiles: game.revealedTiles
     });
-
-    // Start next round or end game after a short delay
+    // Start next round or end game after a 3s delay
     if (this.shouldEndGame(game)) {
       setTimeout(() => this.endGame(gameId), 3000);
     } else {
@@ -403,6 +387,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.activeGames.set(gameId, newGame);
         this.server.to(gameId).emit('gameStart', {
           gameId,
+          word: newGame.word,
           wordLength: newGame.word.length,
           roundId: newGame.currentRound,
           players: [
@@ -414,7 +399,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
           revealedTiles: newGame.revealedTiles
         });
         setTimeout(() => {
-          this.startTick(gameId);
+          this.startRound(gameId);
         }, 3000);
       }, 3000);
     }
@@ -428,11 +413,13 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       gameId,
       winner: this.determineGameWinner(game),
       finalScores: game.scores,
+      word: game.word,
       players: [
         { id: game.players[0] },
         { id: game.players[1] }
       ],
-      roundNumber: game.roundNumber
+      roundNumber: game.roundNumber,
+      revealedTiles: game.revealedTiles
     });
 
     this.activeGames.delete(gameId);
@@ -472,3 +459,4 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return null; // Draw
   }
 }
+
