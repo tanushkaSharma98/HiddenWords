@@ -68,7 +68,20 @@ export default function Room() {
   };
 
   useEffect(() => {
-    if (!socket || !matchId || !currentPlayerId) return;
+    if (!socket || !matchId || !currentPlayerId) {
+      console.log('Socket setup skipped:', { 
+        hasSocket: !!socket, 
+        matchId, 
+        currentPlayerId 
+      });
+      return;
+    }
+
+    console.log('Setting up socket listeners for room:', {
+      matchId,
+      playerId: currentPlayerId,
+      socketId: socket.id
+    });
 
     const onConnect = () => {
       console.log('Socket connected:', socket.id);
@@ -79,30 +92,12 @@ export default function Room() {
       setError('Failed to connect to server');
     };
     const onWaitingRoomCreated = (data: MatchData) => {
-      console.log('Waiting room created with data:', JSON.stringify({
-        matchId: data.matchId,
-        player1: {
-          id: data.player1.id,
-          socketId: data.player1.socketId
-        },
-        player2: {
-          id: data.player2.id,
-          socketId: data.player2.socketId
-        }
-      }, null, 2));
-      const isPlayer1 = currentPlayerId === data.player1.id;
-      const isPlayer2 = currentPlayerId === data.player2.id;
-      const opponentId = isPlayer1 ? data.player2.id : data.player1.id;
-      console.log(`You are ${isPlayer1 ? 'Player 1' : isPlayer2 ? 'Player 2' : 'Unknown'} with ID: ${currentPlayerId}`);
-      console.log(`Your opponent's ID is: ${opponentId}`);
+      console.log('Waiting room created with data:', data);
       setMatchData(data);
       setConnectedPlayers(new Set([data.player1.id, data.player2.id]));
     };
     const onPlayerJoined = ({ playerId, isPlayer1, isPlayer2 }: any) => {
-      console.log('Player joined:', {
-        playerId,
-        role: isPlayer1 ? 'Player 1' : isPlayer2 ? 'Player 2' : 'Unknown'
-      });
+      console.log('Player joined:', { playerId, isPlayer1, isPlayer2 });
       setConnectedPlayers(prev => new Set([...prev, playerId]));
     };
     const onPlayerDisconnected = ({ playerId }: any) => {
@@ -115,12 +110,7 @@ export default function Room() {
       setError('Other player disconnected from the waiting room');
     };
     const onGameStarting = ({ matchId, startedBy }: any) => {
-      console.log('Game starting:', {
-        matchId,
-        startedBy,
-        currentPlayer: currentPlayerId,
-        opponent: getOpponentId()
-      });
+      console.log('Game starting event received:', { matchId, startedBy });
       setIsGameStarting(true);
     };
     const onGameState = (state: GameState) => {
@@ -149,23 +139,18 @@ export default function Room() {
         };
       });
     };
-
-
-
-    // useEffect(() => {
-    //   socket.on('gameStart', ({ gameId }) => {
-    //     // This triggers when the game starts
-    //     console.log("Redirecting to matchRoom with gameId:", gameId);
-    //     router.push(`/matchRoom?gameId=${gameId}`);
-    //   });
-    
-    //   return () => {
-    //     socket.off('gameStart');
-    //   };
-    // }, []);
-    
-
-
+    const onGameStart = ({ gameId }: { gameId: string }) => {
+      console.log('Game start event received:', { gameId });
+      console.log('Redirecting to matchRoom with:', {
+        matchId: gameId,
+        playerId: currentPlayerId
+      });
+      router.push(`/matchRoom?matchId=${gameId}&playerId=${currentPlayerId}`);
+    };
+    const onError = (error: any) => {
+      console.error('Socket error:', error);
+      setError(error.message || 'An error occurred');
+    };
 
     socket.on('connect', onConnect);
     socket.on('connect_error', onConnectError);
@@ -173,24 +158,29 @@ export default function Room() {
     socket.on('playerJoined', onPlayerJoined);
     socket.on('playerDisconnected', onPlayerDisconnected);
     socket.on('gameStarting', onGameStarting);
+    socket.on('gameStart', onGameStart);
     socket.on('gameState', onGameState);
     socket.on('revealTile', onRevealTile);
     socket.on('roundEnd', onRoundEnd);
+    socket.on('error', onError);
 
     // Join the match room
-    console.log('Joining match room with player ID:', currentPlayerId);
+    console.log('Joining match room with:', { matchId, playerId: currentPlayerId });
     socket.emit('joinMatch', { matchId, playerId: currentPlayerId });
 
     return () => {
+      console.log('Cleaning up socket listeners');
       socket.off('connect', onConnect);
       socket.off('connect_error', onConnectError);
       socket.off('waitingRoomCreated', onWaitingRoomCreated);
       socket.off('playerJoined', onPlayerJoined);
       socket.off('playerDisconnected', onPlayerDisconnected);
       socket.off('gameStarting', onGameStarting);
+      socket.off('gameStart', onGameStart);
       socket.off('gameState', onGameState);
       socket.off('revealTile', onRevealTile);
       socket.off('roundEnd', onRoundEnd);
+      socket.off('error', onError);
     };
   }, [socket, matchId, currentPlayerId]);
 
@@ -208,9 +198,20 @@ export default function Room() {
   }, [matchData, currentPlayerId, connectedPlayers, isGameStarting, gameState]);
 
   const handleStartGame = () => {
-    if (!socket || !matchId) return;
+    if (!socket || !matchId) {
+      console.error('Cannot start game:', { socket: !!socket, matchId });
+      return;
+    }
     console.log('Starting game for match:', matchId);
-    socket.emit('startGame', { matchId });
+    console.log('Current socket state:', {
+      connected: socket.connected,
+      id: socket.id,
+      playerId: currentPlayerId
+    });
+    
+    socket.emit('startGame', { matchId }, (response: unknown) => {
+      console.log('Start game response:', response);
+    });
   };
 
   const handleGuess = (guess: string) => {

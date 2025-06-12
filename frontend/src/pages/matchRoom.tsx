@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
-import io from 'socket.io-client';
+import { useSocket } from '../context/SocketContext';
 
 // import PuzzleCard from '@/components/PuzzleCard';
 
@@ -8,11 +8,11 @@ import io from 'socket.io-client';
 //   'https://randomuser.me/api/portraits/women/44.jpg',
 //   'https://randomuser.me/api/portraits/men/32.jpg',
 // ];
-const socket = io('http://localhost:5000', { transports: ['websocket'] });
 
 export default function Match() {
   const router = useRouter();
   const { matchId, playerId } = router.query;
+  const socket = useSocket();
 
   // Dynamic state
   const [timer, setTimer] = useState(10);
@@ -23,18 +23,24 @@ export default function Match() {
   const [word, setWord] = useState('');
   const [revealedTiles, setRevealedTiles] = useState<boolean[]>([]);
   const [players, setPlayers] = useState<{ id: string; name: string; avatar: string }[]>([]);
+  const [guessInput, setGuessInput] = useState('');
 
   // WebSocket event handlers
   useEffect(() => {
-    if (!matchId || !playerId) return;
+    if (!matchId || !playerId || !socket) return;
+    
+    console.log('Joining match room with:', { matchId, playerId });
+    
     // Join the match room
     socket.emit('joinMatch', { matchId, playerId });
 
     // Listen for game state updates
     socket.on('tickStart', (data) => {
+      console.log('Tick start:', data);
       setTimer(Math.floor(data.timeRemaining / 1000));
     });
     socket.on('revealTile', ({ index }) => {
+      console.log('Tile revealed:', index);
       setRevealedTiles((prev) => {
         const updated = [...prev];
         updated[index] = true;
@@ -42,6 +48,7 @@ export default function Match() {
       });
     });
     socket.on('gameState', (data) => {
+      console.log('Game state:', data);
       setWord(data.word);
       setRevealedTiles(data.revealedTiles);
       setScore(data.scores);
@@ -51,16 +58,20 @@ export default function Match() {
       setGuesses(data.guesses || { player1: [], player2: [] });
     });
     socket.on('guessUpdate', (data) => {
+      console.log('Guess update:', data);
       setGuesses(data);
     });
     socket.on('roundEnd', (data) => {
+      console.log('Round end:', data);
       setScore(data.scores);
       setRound((prev) => prev + 1);
       setTimer(10);
     });
     socket.on('gameEnd', (data) => {
+      console.log('Game end:', data);
       // Optionally show winner, etc.
     });
+
     return () => {
       socket.off('tickStart');
       socket.off('revealTile');
@@ -69,7 +80,7 @@ export default function Match() {
       socket.off('roundEnd');
       socket.off('gameEnd');
     };
-  }, [matchId, playerId]);
+  }, [matchId, playerId, socket]);
 
   // Timer countdown (client-side fallback)
   useEffect(() => {
@@ -94,6 +105,16 @@ export default function Match() {
         ))}
       </div>
     );
+  };
+
+  // Helper to determine if current player is player1 or player2
+  const isPlayer1 = players.length > 0 && players[0].id === playerId;
+  const isPlayer2 = players.length > 1 && players[1].id === playerId;
+
+  const handleGuessSubmit = () => {
+    if (!socket || guessInput.trim() === '') return;
+    socket.emit('guess', { matchId, playerId, guess: guessInput.trim() });
+    setGuessInput('');
   };
 
   return (
@@ -142,6 +163,30 @@ export default function Match() {
                 <div key={i} className="bg-white rounded-lg shadow p-2 mb-1 text-[#2D2A32]">{g}</div>
               ))
             )}
+            {/* Guess input for Player 1 */}
+            {isPlayer1 && (
+              <div className="mt-4 flex items-center justify-start">
+                <label className="font-bold text-xs text-black mr-2">GUESS:</label>
+                <div className="relative w-40">
+                  <input
+                    type="text"
+                    value={guessInput}
+                    onChange={e => setGuessInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleGuessSubmit()}
+                    placeholder="Type your guess..."
+                    className="w-full px-3 py-2 rounded-lg border-none outline-none bg-white text-black font-semibold text-sm shadow focus:ring-2 focus:ring-blue-400"
+                    style={{ caretColor: '#2563eb' }}
+                  />
+                  {/* Blinking cursor effect is handled by the input caret */}
+                </div>
+                <button
+                  onClick={handleGuessSubmit}
+                  className="ml-2 px-3 py-2 bg-blue-500 text-white rounded-lg font-bold hover:bg-blue-600 transition"
+                >
+                  Submit
+                </button>
+              </div>
+            )}
           </div>
         </div>
         {/* Center: Word Boxes */}
@@ -165,6 +210,29 @@ export default function Match() {
                 <div key={i} className="bg-white rounded-lg shadow p-2 mb-1 text-[#2D2A32] text-right">{g}</div>
               ))
             )}
+            {/* Guess input for Player 2 */}
+            {isPlayer2 && (
+              <div className="mt-4 flex items-center justify-end">
+                <label className="font-bold text-xs text-black mr-2">GUESS:</label>
+                <div className="relative w-40">
+                  <input
+                    type="text"
+                    value={guessInput}
+                    onChange={e => setGuessInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && handleGuessSubmit()}
+                    placeholder="Type your guess..."
+                    className="w-full px-3 py-2 rounded-lg border-none outline-none bg-white text-black font-semibold text-sm shadow focus:ring-2 focus:ring-blue-400"
+                    style={{ caretColor: '#2563eb' }}
+                  />
+                </div>
+                <button
+                  onClick={handleGuessSubmit}
+                  className="ml-2 px-3 py-2 bg-blue-500 text-white rounded-lg font-bold hover:bg-blue-600 transition"
+                >
+                  Submit
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </main>
@@ -172,129 +240,3 @@ export default function Match() {
   );
 }
 
-
-// import React, { useEffect, useState } from 'react';
-// import { useRouter } from 'next/router';
-// import { useSocket } from '../context/SocketContext';
-
-// interface GameState {
-//   wordLength: number;
-//   revealedTiles: boolean[];
-//   scores: {
-//     player1: number;
-//     player2: number;
-//   };
-// }
-
-// export default function MatchRoom() {
-//   const socket = useSocket();
-//   const router = useRouter();
-//   const { gameId } = router.query;
-
-//   const [gameState, setGameState] = useState<GameState | null>(null);
-//   const [error, setError] = useState<string | null>(null);
-
-//   useEffect(() => {
-//     if (!socket || !gameId) return;
-
-//     const onGameState = (state: GameState) => {
-//       console.log('Game state received:', state);
-//       setGameState(state);
-//     };
-
-//     const onRevealTile = ({ index }: any) => {
-//       setGameState(prev => {
-//         if (!prev) return prev;
-//         const newTiles = [...prev.revealedTiles];
-//         newTiles[index] = true;
-//         return { ...prev, revealedTiles: newTiles };
-//       });
-//     };
-
-//     const onRoundEnd = ({ winner, revealedWord, scores }: any) => {
-//       alert(`Round Over! Winner: ${winner}. Word was: ${revealedWord}`);
-//       setGameState(prev => prev ? { ...prev, scores } : prev);
-//     };
-
-//     socket.on('gameState', onGameState);
-//     socket.on('revealTile', onRevealTile);
-//     socket.on('roundEnd', onRoundEnd);
-
-//     return () => {
-//       socket.off('gameState', onGameState);
-//       socket.off('revealTile', onRevealTile);
-//       socket.off('roundEnd', onRoundEnd);
-//     };
-//   }, [socket, gameId]);
-
-//   const handleGuess = (guess: string) => {
-//     if (!socket || !gameId) return;
-//     socket.emit('submitGuess', {
-//       gameId,
-//       guess
-//     });
-//   };
-
-//   return (
-//     <div className="min-h-screen bg-[#FFE6E6] p-8">
-//       <div className="max-w-4xl mx-auto">
-//         <h1 className="text-4xl font-bold text-[#FF4B4B] mb-8">Match Room</h1>
-
-//         {error && (
-//           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
-//             {error}
-//           </div>
-//         )}
-
-//         {gameState ? (
-//           <>
-//             <div className="bg-white rounded-lg p-6 shadow-lg mb-6">
-//               <h2 className="text-2xl font-semibold mb-4">Scores</h2>
-//               <div className="flex justify-between">
-//                 <p>Player 1: {gameState.scores.player1}</p>
-//                 <p>Player 2: {gameState.scores.player2}</p>
-//               </div>
-//             </div>
-
-//             <div className="bg-white rounded-lg p-6 shadow-lg mb-6">
-//               <h2 className="text-2xl font-semibold mb-4">Word</h2>
-//               <div className="flex justify-center space-x-4">
-//                 {gameState.revealedTiles.map((revealed, i) => (
-//                   <div key={i} className="w-12 h-12 border-2 border-[#FF4B4B] rounded-lg flex items-center justify-center text-2xl font-bold">
-//                     {revealed ? '?' : '_'}
-//                   </div>
-//                 ))}
-//               </div>
-//             </div>
-
-//             <div className="bg-white rounded-lg p-6 shadow-lg">
-//               <h2 className="text-2xl font-semibold mb-4">Submit a Guess</h2>
-//               <div className="flex space-x-4">
-//                 <input
-//                   type="text"
-//                   className="flex-1 px-4 py-2 border-2 border-[#FF4B4B] rounded-lg focus:outline-none focus:border-[#FF9E9E]"
-//                   placeholder="Guess the word"
-//                   maxLength={gameState.wordLength}
-//                 />
-//                 <button
-//                   onClick={() => {
-//                     const input = document.querySelector('input');
-//                     if (input) {
-//                       handleGuess((input as HTMLInputElement).value);
-//                       (input as HTMLInputElement).value = '';
-//                     }
-//                   }}
-//                   className="px-6 py-2 bg-[#FF4B4B] text-white rounded-lg hover:bg-[#FF9E9E] transition-colors"
-//                 >
-//                   Submit
-//                 </button>
-//               </div>
-//             </div>
-//           </>
-//         ) : (
-//           <p className="text-gray-600">Waiting for game state...</p>
-//         )}
-//       </div>
-//     </div>
-//   );
-// }
