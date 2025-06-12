@@ -74,6 +74,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
+    // Ensure player exists in DB before adding to queue
+    await this.gameService.createPlayerIfNotExists(playerId);
+
     // Add player to lobby queue
     this.lobbyQueue.push({ socket: client, playerId });
     this.logger.log(`Player ${playerId} joined the lobby. Queue size: ${this.lobbyQueue.length}`);
@@ -82,6 +85,20 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (this.lobbyQueue.length >= 2) {
       const [player1, player2] = this.lobbyQueue.splice(0, 2);
       const matchId = uuidv4();
+
+      try {
+        // Ensure both players exist in DB
+        await this.gameService.createPlayerIfNotExists(player1.playerId);
+        await this.gameService.createPlayerIfNotExists(player2.playerId);
+        this.logger.log(`Ensured both players exist in DB: ${player1.playerId}, ${player2.playerId}`);
+        // Create match in DB
+        const match = await this.gameService.createMatch(matchId, player1.playerId, player2.playerId);
+        this.logger.log(`Created match in DB: ${match.id}`);
+      } catch (err) {
+        this.logger.error('Error creating players or match in DB:', err);
+        client.emit('error', { message: 'Failed to create match in DB' });
+        return;
+      }
 
       // Both players join the match room
       player1.socket.join(matchId);
@@ -179,13 +196,18 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         player1Id = match.player1.id;
         player2Id = match.player2.id;
       }
+      if (!player1Id || !player2Id) {
+        this.logger.error(`Missing player IDs for match ${matchId}`);
+        this.server.to(matchId).emit('error', { message: 'Missing player IDs' });
+        return;
+      }
       this.logger.log(`Starting game for match ${matchId} with players:`, { player1Id, player2Id });
 
       // Initialize the game
       this.logger.log(`Initializing game for match ${matchId}`);
       const game = await this.gameService.initializeGame(matchId);
+      game.players = [player1Id, player2Id];
       this.activeGames.set(matchId, game);
-      
       // Emit gameStart event with the game data
       this.logger.log(`Emitting gameStart to match ${matchId} with game data:`, {
         gameId: matchId,
@@ -194,9 +216,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         players: [
           { id: player1Id },
           { id: player2Id }
-        ]
+        ],
+        scores: game.scores,
+        roundNumber: game.roundNumber,
+        revealedTiles: game.revealedTiles
       });
-      
       this.server.to(matchId).emit('gameStart', {
         gameId: matchId,
         wordLength: game.word.length,
@@ -204,7 +228,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         players: [
           { id: player1Id },
           { id: player2Id }
-        ]
+        ],
+        scores: game.scores,
+        roundNumber: game.roundNumber,
+        revealedTiles: game.revealedTiles
       });
 
       // Start the first tick after a short delay
@@ -233,10 +260,26 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!timestamp || timestamp - game.tickStartTime > tickDuration) {
       return { error: 'Late submission' };
     }
+    // Map socket ID to player ID
+    const playerId = this.socketToPlayer.get(client.id);
+    if (!playerId) return { error: 'Player not found' };
     // Allow multiple guesses per tick, always store the latest
-    game.tickGuesses.set(client.id, { guess, tick: game.currentTick });
-    // Emit guessUpdate to both players
-    this.server.to(gameId).emit('guessUpdate', Array.from(game.tickGuesses.entries()).map(([pid, g]) => ({ playerId: pid, guess: g.guess })));
+    game.tickGuesses.set(playerId, { guess, tick: game.currentTick });
+    // Map guesses to { player1: [...], player2: [...] }
+    const player1Id = game.players[0];
+    const player2Id = game.players[1];
+    const guessesObj: { player1: string[]; player2: string[] } = { player1: [], player2: [] };
+    for (const [pid, g] of game.tickGuesses.entries()) {
+      if (pid === player1Id) guessesObj.player1.push(g.guess);
+      else if (pid === player2Id) guessesObj.player2.push(g.guess);
+    }
+    this.server.to(gameId).emit('guessUpdate', {
+      guesses: guessesObj,
+      players: [
+        { id: player1Id },
+        { id: player2Id }
+      ]
+    });
 
     // Check for correct guess
     const correctPlayers = Array.from(game.tickGuesses.entries())
@@ -278,7 +321,13 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       tick: game.currentTick,
       timeRemaining: 5000,
       revealedTiles: game.revealedTiles,
-      serverTime: game.tickStartTime
+      serverTime: game.tickStartTime,
+      players: [
+        { id: game.players[0] },
+        { id: game.players[1] }
+      ],
+      scores: game.scores,
+      roundNumber: game.roundNumber
     });
   }
 
@@ -298,7 +347,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.to(gameId).emit('revealTile', {
       gameId,
       index: revealedTile.index,
-      letter: revealedTile.letter
+      letter: revealedTile.letter,
+      players: [
+        { id: game.players[0] },
+        { id: game.players[1] }
+      ],
+      revealedTiles: game.revealedTiles,
+      scores: game.scores,
+      roundNumber: game.roundNumber
     });
 
     if (revealedTile.isComplete) {
@@ -313,12 +369,27 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!game) return;
 
     await this.gameService.endRound(gameId, result);
-    
+    // Map guesses to { player1: [...], player2: [...] }
+    const player1Id = game.players[0];
+    const player2Id = game.players[1];
+    const guessesObj: { player1: string[]; player2: string[] } = { player1: [], player2: [] };
+    if (game.tickGuesses) {
+      for (const [pid, g] of game.tickGuesses.entries()) {
+        if (pid === player1Id) guessesObj.player1.push(g.guess);
+        else if (pid === player2Id) guessesObj.player2.push(g.guess);
+      }
+    }
     this.server.to(gameId).emit('roundEnd', {
       gameId,
       winner: result.winner,
       revealedWord: result.revealedWord,
-      scores: game.scores
+      scores: game.scores,
+      guesses: guessesObj,
+      players: [
+        { id: player1Id },
+        { id: player2Id }
+      ],
+      roundNumber: game.roundNumber
     });
 
     // Start next round or end game after a short delay
@@ -328,11 +399,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       setTimeout(async () => {
         // Start next round
         const newGame = await this.gameService.initializeGame(gameId);
+        newGame.players = game.players;
         this.activeGames.set(gameId, newGame);
         this.server.to(gameId).emit('gameStart', {
           gameId,
           wordLength: newGame.word.length,
-          roundId: newGame.currentRound
+          roundId: newGame.currentRound,
+          players: [
+            { id: newGame.players[0] },
+            { id: newGame.players[1] }
+          ],
+          scores: newGame.scores,
+          roundNumber: newGame.roundNumber,
+          revealedTiles: newGame.revealedTiles
         });
         setTimeout(() => {
           this.startTick(gameId);
@@ -348,7 +427,12 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.server.to(gameId).emit('gameEnd', {
       gameId,
       winner: this.determineGameWinner(game),
-      finalScores: game.scores
+      finalScores: game.scores,
+      players: [
+        { id: game.players[0] },
+        { id: game.players[1] }
+      ],
+      roundNumber: game.roundNumber
     });
 
     this.activeGames.delete(gameId);

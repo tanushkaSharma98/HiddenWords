@@ -101,12 +101,20 @@ export class GameService {
   }
 
   async createPlayerIfNotExists(playerId: string) {
-    this.logger.log(`Checking/creating player in DB: ${playerId}`);
-    const existing = await this.playerRepository.findOne({ where: { id: playerId } });
-    if (!existing) {
-      this.logger.log(`Creating new player in DB: ${playerId}`);
-      const player = this.playerRepository.create({ id: playerId, username: `Guest-${playerId.slice(0, 8)}` });
-      await this.playerRepository.save(player);
+    this.logger.log(`[DB] Checking/creating player in DB: ${playerId}`);
+    try {
+      const existing = await this.playerRepository.findOne({ where: { id: playerId } });
+      if (!existing) {
+        this.logger.log(`[DB] Creating new player in DB: ${playerId}`);
+        const player = this.playerRepository.create({ id: playerId, username: `Guest-${playerId.slice(0, 8)}` });
+        await this.playerRepository.save(player);
+        this.logger.log(`[DB] Player created: ${playerId}`);
+      } else {
+        this.logger.log(`[DB] Player already exists: ${playerId}`);
+      }
+    } catch (err) {
+      this.logger.error(`[DB] Error creating/finding player: ${playerId}`, err);
+      throw err;
     }
   }
 
@@ -149,7 +157,7 @@ export class GameService {
         player2: 0
       },
       currentRound: uuidv4(),
-      players: [],
+      players: [] as string[],
       guesses: new Map()
     };
 
@@ -256,5 +264,30 @@ export class GameService {
       where: { id: matchId },
       relations: ['player1', 'player2']
     });
+  }
+
+  async createMatch(matchId: string, player1Id: string, player2Id: string) {
+    this.logger.log(`[DB] Fetching players for match: ${player1Id}, ${player2Id}`);
+    try {
+      const player1 = await this.playerRepository.findOne({ where: { id: player1Id } });
+      const player2 = await this.playerRepository.findOne({ where: { id: player2Id } });
+      if (!player1 || !player2) {
+        this.logger.error(`[DB] Could not find both players in DB: ${player1Id}, ${player2Id}`);
+        throw new Error('Player not found');
+      }
+      this.logger.log(`[DB] Creating match entity in DB for players: ${player1Id}, ${player2Id} with id: ${matchId}`);
+      const match = this.matchRepository.create({
+        id: matchId,
+        player1,
+        player2,
+        status: 'ongoing',
+      });
+      await this.matchRepository.save(match);
+      this.logger.log(`[DB] Saved match in DB: ${match.id}`);
+      return match;
+    } catch (err) {
+      this.logger.error(`[DB] Error creating match: ${player1Id}, ${player2Id}`, err);
+      throw err;
+    }
   }
 }
