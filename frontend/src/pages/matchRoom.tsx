@@ -38,7 +38,11 @@ export default function Match() {
   const [winner, setWinner] = useState<string | null>(null);
 
   // Helper to get opponent ID
-  const opponentId = players.find(p => p.id !== playerId)?.id;
+  // const opponentId = players.find(p => p.id !== playerId)?.id;
+
+  const opponentId = players.length === 2
+  ? players.find(p => p.id !== playerId)?.id
+  : undefined;
 
   // WebSocket event handlers
   useEffect(() => {
@@ -51,8 +55,8 @@ export default function Match() {
 
     // Listen for game events
     socket.on('gameStart', (data) => {
-      setWord('');
-      setRevealedTiles(new Array(data.wordLength).fill(false));
+      setWord(data.word || '');
+      setRevealedTiles(data.revealedTiles || new Array(data.wordLength).fill(false));
       setRound(data.roundNumber || 1);
       setMaxRounds(data.maxRounds || 5);
       setPlayers(data.players || []);
@@ -67,6 +71,7 @@ export default function Match() {
       if (data.players) setPlayers(data.players);
       if (data.scores) setScore(data.scores);
       if (data.roundNumber) setRound(data.roundNumber);
+      if (data.word) setWord(data.word);
     });
     socket.on('revealTile', (data) => {
       console.log('Tile revealed:', data);
@@ -74,6 +79,7 @@ export default function Match() {
       if (data.players) setPlayers(data.players);
       if (data.scores) setScore(data.scores);
       if (data.roundNumber) setRound(data.roundNumber);
+      if (data.word) setWord(data.word);
     });
     socket.on('gameState', (data) => {
       console.log('Game state:', data);
@@ -94,11 +100,12 @@ export default function Match() {
     socket.on('roundEnd', (data) => {
       console.log('Round end:', data);
       setScore(data.scores);
-      setRound(data.roundNumber || (prev => prev + 1));
+      setRound(data.roundNumber || round + 1);
       setTimer(10);
       if (data.players) setPlayers(data.players);
       if (data.guesses) setGuesses(data.guesses);
       if (data.winner) setWinner(data.winner);
+      if (data.word) setWord(data.word);
     });
     socket.on('gameEnd', (data) => {
       console.log('Game end:', data);
@@ -106,7 +113,24 @@ export default function Match() {
       setScore(data.finalScores || score);
       if (data.players) setPlayers(data.players);
       if (data.roundNumber) setRound(data.roundNumber);
+      if (data.word) setWord(data.word);
     });
+
+    // Listen for playerDisconnected
+    const onPlayerDisconnected = (data: { playerId: string }) => {
+      setPlayers(prev => prev.filter(p => p.id !== data.playerId));
+    };
+
+    // Listen for playerJoined (reconnection)
+    const onPlayerJoined = (data: { playerId: string }) => {
+      setPlayers(prev => {
+        if (prev.find(p => p.id === data.playerId)) return prev;
+        return [...prev, { id: data.playerId }];
+      });
+    };
+
+    socket.on('playerDisconnected', onPlayerDisconnected);
+    socket.on('playerJoined', onPlayerJoined);
 
     return () => {
       socket.off('gameStart');
@@ -116,6 +140,8 @@ export default function Match() {
       socket.off('guessUpdate');
       socket.off('roundEnd');
       socket.off('gameEnd');
+      socket.off('playerDisconnected', onPlayerDisconnected);
+      socket.off('playerJoined', onPlayerJoined);
     };
   }, [matchId, playerId, socket]);
 
@@ -126,23 +152,6 @@ export default function Match() {
       return () => clearTimeout(t);
     }
   }, [timer]);
-
-  // Helper to render word tiles
-  const renderTiles = () => {
-    if (!word) return null;
-    return (
-      <div className="flex justify-center gap-2 mt-4">
-        {word.split('').map((char, idx) => (
-          <div
-            key={idx}
-            className="w-14 h-14 flex items-center justify-center text-3xl font-bold border-2 border-[#2D2A32] rounded-lg bg-[#F8F8F8]"
-          >
-            {revealedTiles[idx] ? char : ''}
-          </div>
-        ))}
-      </div>
-    );
-  };
 
   // Helper to determine if current player is player1 or player2
   const isPlayer1 = players.length > 0 && players[0]?.id === playerId;
@@ -181,6 +190,15 @@ export default function Match() {
     console.log('Players array:', players, 'Current playerId:', playerId);
   }, [players, playerId]);
 
+useEffect(() => {
+  const handler = (e: BeforeUnloadEvent) => {
+    e.preventDefault();
+    e.returnValue = '';
+  };
+  window.addEventListener('beforeunload', handler);
+  return () => window.removeEventListener('beforeunload', handler);
+}, []);
+
   return (
     <div className="min-h-screen bg-[#FFE6E6] flex flex-col">
       {/* Header */}
@@ -195,7 +213,11 @@ export default function Match() {
       {/* Player IDs */}
       <div className="flex justify-center gap-8 mt-2">
         <div className="text-xs text-gray-700 bg-white rounded px-3 py-1 shadow">Your ID: {playerId}</div>
-        {opponentId && <div className="text-xs text-gray-700 bg-white rounded px-3 py-1 shadow">Opponent ID: {opponentId}</div>}
+        {players.length === 2 && opponentId ? (
+          <div className="text-xs text-gray-700 bg-white rounded px-3 py-1 shadow">Opponent ID: {opponentId}</div>
+        ) : (
+          <div className="text-xs text-red-600 bg-white rounded px-3 py-1 shadow">Opponent disconnected...</div>
+        )}
       </div>
       {/* Winner display */}
       {winner && (
@@ -267,7 +289,7 @@ export default function Match() {
         </div>
         {/* Center: Word Boxes */}
         <div className="flex flex-col items-center justify-center flex-1">
-          <PuzzleCard />
+          <PuzzleCard word={word} revealedTiles={revealedTiles} />
         </div>
         {/* Right: Timer, Round, Player 2 Guesses */}
         <div className="flex flex-col justify-between w-56 items-end">
