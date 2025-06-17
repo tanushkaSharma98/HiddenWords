@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { io, Socket } from 'socket.io-client';
 import { useRouter } from 'next/router';
+import { useSocket } from '../context/SocketContext';
 
 interface LobbyProps {
   onGameStart: (gameId: string) => void;
@@ -18,76 +18,53 @@ interface MatchData {
 }
 
 export default function Lobby({ onGameStart }: LobbyProps) {
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [status, setStatus] = useState<'idle' | 'waiting' | 'matched'>('idle');
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
+  const socket = useSocket();
 
   useEffect(() => {
-    // Initialize socket connection
-    const newSocket = io('http://localhost:5000', {
-      transports: ['websocket'],
-      autoConnect: true
-    });
+    if (!socket) return;
 
-    newSocket.on('connect', () => {
-      console.log('Socket connected:', newSocket.id);
-      setError(null);
-    });
-
-    newSocket.on('connect_error', (err) => {
-      console.error('Connection error:', err);
-      setError('Failed to connect to server');
-    });
-
-    newSocket.on('playerId', ({ playerId }) => {
+    const onPlayerId = ({ playerId }: { playerId: string }) => {
       localStorage.setItem('playerId', playerId);
-    });
-
-    // newSocket.on('waitingRoomCreated', (data: MatchData) => {
-    //   console.log('Waiting room created:', data);
-    newSocket.on('waitingRoomCreated', (data: MatchData) => {
-      // Save match data to localStorage
+    };
+    const onWaitingRoomCreated = (data: MatchData) => {
       localStorage.setItem('matchData', JSON.stringify(data));
       localStorage.setItem('matchId', data.matchId);
       localStorage.setItem('player1Id', data.player1.id);
       localStorage.setItem('player2Id', data.player2.id);
-    
       setStatus('matched');
       router.push(`/room?matchId=${data.matchId}`);
-    });
-      
-    //   // Store match data in localStorage
-    //   localStorage.setItem('matchId', data.matchId);
-    //   localStorage.setItem('player1Id', data.player1.id);
-    //   localStorage.setItem('player2Id', data.player2.id);
-      
-    //   // Navigate to game room
-    //   router.push(`/room?matchId=${data.matchId}`);
-    // });
-
-    newSocket.on('gameStarting', (data) => {
-      console.log('Game starting:', data);
-      onGameStart(data.matchId);
-    });
-
-    setSocket(newSocket);
-
-    // Cleanup on unmount
-    return () => {
-      newSocket.close();
     };
-  }, [onGameStart, router]);
+    const onGameStarting = (data: any) => {
+      onGameStart(data.matchId);
+    };
+    const onConnect = () => setError(null);
+    const onConnectError = (err: any) => setError('Failed to connect to server');
+
+    socket.on('playerId', onPlayerId);
+    socket.on('waitingRoomCreated', onWaitingRoomCreated);
+    socket.on('gameStarting', onGameStarting);
+    socket.on('connect', onConnect);
+    socket.on('connect_error', onConnectError);
+
+    return () => {
+      socket.off('playerId', onPlayerId);
+      socket.off('waitingRoomCreated', onWaitingRoomCreated);
+      socket.off('gameStarting', onGameStarting);
+      socket.off('connect', onConnect);
+      socket.off('connect_error', onConnectError);
+    };
+  }, [socket, onGameStart, router]);
 
   const handleJoinLobby = () => {
     if (!socket) {
       setError('Not connected to server');
       return;
     }
-
     setStatus('waiting');
     socket.emit('joinLobby');
-    console.log('Emitted joinLobby');
   };
 
   return (

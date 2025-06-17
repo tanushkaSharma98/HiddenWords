@@ -1,24 +1,21 @@
-import React, { createContext, useContext, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { ReactNode } from 'react';
 
 const SocketContext = createContext<Socket | null>(null);
 
-export const SocketProvider = ({ children }: { children: ReactNode }) => {
-  const socketRef = useRef<Socket | null>(null);
+// Create a single socket instance outside the component
+const socket = io('http://localhost:5000', {
+  transports: ['websocket'],
+  autoConnect: true,
+  query: {
+    playerId: typeof window !== 'undefined' ? localStorage.getItem('playerId') : undefined,
+  },
+});
 
-  useEffect(() => {
-    if (!socketRef.current) {
-      socketRef.current = io('http://localhost:5000', {
-        transports: ['websocket'],
-        autoConnect: true,
-      });
-    }
-    return () => {
-      // Optionally disconnect on unmount
-      // socketRef.current?.disconnect();
-    };
-  }, []);
+export const SocketProvider = ({ children }: { children: ReactNode }) => {
+  // Use a ref to avoid re-renders
+  const socketRef = useRef<Socket>(socket);
 
   return (
     <SocketContext.Provider value={socketRef.current}>
@@ -28,3 +25,5 @@ export const SocketProvider = ({ children }: { children: ReactNode }) => {
 };
 
 export const useSocket = () => useContext(SocketContext);
+// Optionally export socket for debugging
+export { socket };

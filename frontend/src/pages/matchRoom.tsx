@@ -47,14 +47,10 @@ export default function Match() {
   // WebSocket event handlers
   useEffect(() => {
     if (!matchId || !playerId || !socket) return;
-    
-    console.log('Joining match room with:', { matchId, playerId });
-    
-    // Join the match room
-    socket.emit('joinMatch', { matchId, playerId });
 
-    // Listen for game events
-    socket.on('gameStart', (data) => {
+    // --- 1. Set up all handlers first ---
+    const onGameStart = (data: any) => {
+      console.log('gameStart data:', data);
       setWord(data.word || '');
       setRevealedTiles(data.revealedTiles || new Array(data.wordLength).fill(false));
       setRound(data.roundNumber || 1);
@@ -63,8 +59,10 @@ export default function Match() {
       setGuesses({ player1: [], player2: [] });
       setScore(data.scores || { player1: 0, player2: 0 });
       setWinner(null);
-    });
-    socket.on('tickStart', (data) => {
+    };
+    socket.on('gameStart', onGameStart);
+
+    const onTickStart = (data: any) => {
       console.log('Tick start:', data);
       setTimer(Math.floor(data.timeRemaining / 1000));
       setRevealedTiles(data.revealedTiles);
@@ -72,16 +70,20 @@ export default function Match() {
       if (data.scores) setScore(data.scores);
       if (data.roundNumber) setRound(data.roundNumber);
       if (data.word) setWord(data.word);
-    });
-    socket.on('revealTile', (data) => {
+    };
+    socket.on('tickStart', onTickStart);
+
+    const onRevealTile = (data: any) => {
       console.log('Tile revealed:', data);
       setRevealedTiles(data.revealedTiles);
       if (data.players) setPlayers(data.players);
       if (data.scores) setScore(data.scores);
       if (data.roundNumber) setRound(data.roundNumber);
       if (data.word) setWord(data.word);
-    });
-    socket.on('gameState', (data) => {
+    };
+    socket.on('revealTile', onRevealTile);
+
+    const onGameState = (data: any) => {
       console.log('Game state:', data);
       setWord(data.word);
       setRevealedTiles(data.revealedTiles);
@@ -91,13 +93,17 @@ export default function Match() {
       setPlayers(data.players || []);
       setGuesses(data.guesses || { player1: [], player2: [] });
       setWinner(null);
-    });
-    socket.on('guessUpdate', (data) => {
+    };
+    socket.on('gameState', onGameState);
+
+    const onGuessUpdate = (data: any) => {
       console.log('Guess update:', data);
       if (data.players) setPlayers(data.players);
       if (data.guesses) setGuesses(data.guesses);
-    });
-    socket.on('roundEnd', (data) => {
+    };
+    socket.on('guessUpdate', onGuessUpdate);
+
+    const onRoundEnd = (data: any) => {
       console.log('Round end:', data);
       setScore(data.scores);
       setRound(data.roundNumber || round + 1);
@@ -106,40 +112,61 @@ export default function Match() {
       if (data.guesses) setGuesses(data.guesses);
       if (data.winner) setWinner(data.winner);
       if (data.word) setWord(data.word);
-    });
-    socket.on('gameEnd', (data) => {
+    };
+    socket.on('roundEnd', onRoundEnd);
+
+    const onGameEnd = (data: any) => {
       console.log('Game end:', data);
       setWinner(data.winner);
       setScore(data.finalScores || score);
       if (data.players) setPlayers(data.players);
       if (data.roundNumber) setRound(data.roundNumber);
       if (data.word) setWord(data.word);
-    });
-
-    // Listen for playerDisconnected
-    const onPlayerDisconnected = (data: { playerId: string }) => {
-      setPlayers(prev => prev.filter(p => p.id !== data.playerId));
     };
+    socket.on('gameEnd', onGameEnd);
 
-    // Listen for playerJoined (reconnection)
-    const onPlayerJoined = (data: { playerId: string }) => {
+    const onWaitingRoomCreated = (data: any) => {
+      console.log('waitingRoomCreated data:', data);
+      setPlayers([
+        { id: data.player1.id },
+        { id: data.player2.id }
+      ]);
+      setTimeout(() => console.log('Players after waitingRoomCreated:', [data.player1.id, data.player2.id]), 0);
+    };
+    socket.on('waitingRoomCreated', onWaitingRoomCreated);
+
+    const onPlayerJoined = (data: any) => {
       setPlayers(prev => {
         if (prev.find(p => p.id === data.playerId)) return prev;
-        return [...prev, { id: data.playerId }];
+        const updated = [...prev, { id: data.playerId }];
+        setTimeout(() => console.log('Players after playerJoined:', updated), 0);
+        return updated;
       });
     };
-
-    socket.on('playerDisconnected', onPlayerDisconnected);
     socket.on('playerJoined', onPlayerJoined);
 
+    const onPlayerDisconnected = (data: any) => {
+      setPlayers(prev => {
+        const updated = prev.filter(p => p.id !== data.playerId);
+        setTimeout(() => console.log('Players after playerDisconnected:', updated), 0);
+        return updated;
+      });
+    };
+    socket.on('playerDisconnected', onPlayerDisconnected);
+
+    // --- 2. Now emit joinMatch ---
+    console.log('Emitting joinMatch with:', { matchId, playerId });
+    socket.emit('joinMatch', { matchId, playerId });
+
     return () => {
-      socket.off('gameStart');
-      socket.off('tickStart');
-      socket.off('revealTile');
-      socket.off('gameState');
-      socket.off('guessUpdate');
-      socket.off('roundEnd');
-      socket.off('gameEnd');
+      socket.off('gameStart', onGameStart);
+      socket.off('tickStart', onTickStart);
+      socket.off('revealTile', onRevealTile);
+      socket.off('gameState', onGameState);
+      socket.off('guessUpdate', onGuessUpdate);
+      socket.off('roundEnd', onRoundEnd);
+      socket.off('gameEnd', onGameEnd);
+      socket.off('waitingRoomCreated', onWaitingRoomCreated);
       socket.off('playerDisconnected', onPlayerDisconnected);
       socket.off('playerJoined', onPlayerJoined);
     };
@@ -198,6 +225,18 @@ useEffect(() => {
   window.addEventListener('beforeunload', handler);
   return () => window.removeEventListener('beforeunload', handler);
 }, []);
+
+useEffect(() => {
+  if (!socket || !matchId || !playerId) return;
+  const onConnect = () => {
+    // Re-emit joinMatch on reconnect
+    socket.emit('joinMatch', { matchId, playerId });
+  };
+  socket.on('connect', onConnect);
+  return () => {
+    socket.off('connect', onConnect);
+  };
+}, [socket, matchId, playerId]);
 
   return (
     <div className="min-h-screen bg-[#FFE6E6] flex flex-col">

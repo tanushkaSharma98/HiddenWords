@@ -44,23 +44,6 @@ export default function Room() {
     }
   }, []);
 
-
-  useEffect(() => {
-    if (!socket) return;
-  
-    const onGameStart = ({ gameId }: { gameId: string }) => {
-      console.log("Redirecting to matchRoom with gameId:", gameId);
-      router.push(`/matchRoom?gameId=${gameId}`);
-    };
-  
-    socket.on('gameStart', onGameStart);
-  
-    return () => {
-      socket.off('gameStart', onGameStart); // Now removing the exact same function
-    };
-  }, [socket, router]);
-  
-
   // Get opponent ID
   const getOpponentId = () => {
     if (!matchData || !currentPlayerId) return null;
@@ -94,17 +77,24 @@ export default function Room() {
     const onWaitingRoomCreated = (data: MatchData) => {
       console.log('Waiting room created with data:', data);
       setMatchData(data);
-      setConnectedPlayers(new Set([data.player1.id, data.player2.id]));
+      const updated = new Set([data.player1.id, data.player2.id]);
+      setConnectedPlayers(updated);
+      setTimeout(() => console.log('connectedPlayers after waitingRoomCreated:', Array.from(updated)), 0);
     };
-    const onPlayerJoined = ({ playerId, isPlayer1, isPlayer2 }: any) => {
-      console.log('Player joined:', { playerId, isPlayer1, isPlayer2 });
-      setConnectedPlayers(prev => new Set([...prev, playerId]));
+    const onPlayerJoined = ({ playerId }: any) => {
+      console.log('Player joined:', { playerId });
+      setConnectedPlayers(prev => {
+        const updated = new Set([...prev, playerId]);
+        setTimeout(() => console.log('connectedPlayers after playerJoined:', Array.from(updated)), 0);
+        return updated;
+      });
     };
     const onPlayerDisconnected = ({ playerId }: any) => {
       console.log('Player disconnected:', playerId);
       setConnectedPlayers(prev => {
         const newSet = new Set(prev);
         newSet.delete(playerId);
+        setTimeout(() => console.log('connectedPlayers after playerDisconnected:', Array.from(newSet)), 0);
         return newSet;
       });
       setError('Other player disconnected from the waiting room');
