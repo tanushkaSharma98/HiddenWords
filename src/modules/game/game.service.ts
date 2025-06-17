@@ -13,15 +13,15 @@ import { Guess } from '../../entities/guess.entity';
 
 @Injectable()
 export class GameService {
-  private lobbyQueue: { socket: Socket; playerId: string }[] = [];
-  private logger: Logger = new Logger('GameService');
-  private lobby: string[] = [];
-  private games = new Map<string, any>();
+  private lobbyQueue: { socket: Socket; playerId: string }[] = []; //Server assigns a playerId and waits for "join" action. Queue of players waiting for a match
+  private logger: Logger = new Logger('GameService'); // Logger instance to log server-side messages
+  private lobby: string[] = []; //alternative queue storing just player id
+  private games = new Map<string, any>();//store in-memory game data keyed by gameId
   private words: string[];
 
   constructor(
     @InjectRepository(Match)
-    private matchRepository: Repository<Match>,
+    private matchRepository: Repository<Match>, //
 
     @InjectRepository(Player)
     private playerRepository: Repository<Player>,
@@ -38,7 +38,7 @@ export class GameService {
       
       // If not found, try dist directory (production)
       if (!fs.existsSync(wordsPath)) {
-        wordsPath = path.join(__dirname, '../../../src/data/word.json');
+        wordsPath = path.join(__dirname, '../../../src/data/word.json'); //dist directory(production)
       }
       
       if (!fs.existsSync(wordsPath)) {
@@ -49,17 +49,16 @@ export class GameService {
       this.words = wordsData.words;
     } catch (error) {
       console.error('Error loading words:', error);
-      // Fallback to a default word list if file can't be loaded
-      this.words = ['APPLE', 'BEACH', 'CLOUD', 'DREAM', 'EARTH'];
+      throw error;
     }
   }
-
+//handles putting player in lobby queue and start if the player are ready
   async addToLobby(socket: Socket, playerId: string, server: Server): Promise<string | null> {
-    this.logger.log(`Player ${playerId} joined the lobby`);
-    this.lobbyQueue.push({ socket, playerId });
+    this.logger.log(`Player ${playerId} joined the lobby`); //player emits join lobby , server adds them to queue
+    this.lobbyQueue.push({ socket, playerId });//Adds the player and their socket to the lobbyQueue array.
 
     if (this.lobbyQueue.length >= 2) {
-      const [p1, p2] = this.lobbyQueue.splice(0, 2);
+      const [p1, p2] = this.lobbyQueue.splice(0, 2);//Takes the first 2 players from the queue.
 
       // Ensure both players exist in DB
       await this.createPlayerIfNotExists(p1.playerId);
@@ -144,13 +143,13 @@ export class GameService {
     return null;
   }
 
-  async initializeGame(gameId: string) {
+  async initializeGame(gameId: string, roundNumber = 1) {
     const word = this.getRandomWord();
     const game = {
       id: gameId,
       word,
       revealedTiles: new Array(word.length).fill(false),
-      roundNumber: 1,
+      roundNumber,
       status: 'active',
       scores: {
         player1: 0,
@@ -169,7 +168,8 @@ export class GameService {
     const game = this.games.get(gameId);
     if (!game || game.status !== 'active') {
       return { error: 'Invalid game state' };
-    }
+    }//Players make guesses
+    
 
     // Check if player already guessed this round
     if (game.guesses.has(playerId)) {

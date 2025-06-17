@@ -34,6 +34,7 @@ import { GameGateway } from './modules/game/game.gateway';
       RoundModule,
       WordsModule,
     GuessModule,
+    // GameGateway,
 
   ],
   controllers: [AppController],

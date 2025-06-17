@@ -12,7 +12,7 @@ async function bootstrap() {
     credentials: true,
   });
 
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true })); //applies a global validation pipe to all incoming HTTP requests.
 
   app.useWebSocketAdapter(new IoAdapter(app));
 

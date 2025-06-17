@@ -9,6 +9,8 @@ import { Server, Socket } from 'socket.io';
 import { GameService } from './game.service';
 import { Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
+import { RoundService } from '../round/round.service';
+import { GuessService } from '../guess/guess.service';
 
 @WebSocketGateway({
   cors: {
@@ -23,13 +25,40 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private socketToPlayer = new Map<string, string>();
   private lobbyQueue: { socket: Socket; playerId: string }[] = [];
   private waitingRooms = new Map<string, { player1: string; player2: string }>();
+  private disconnectTimeouts = new Map<string, NodeJS.Timeout>(); // playerId -> timeout
 
-  constructor(private readonly gameService: GameService) {}
-
+  constructor(
+    private readonly gameService: GameService,
+    private readonly roundService: RoundService,
+    private readonly guessService: GuessService
+  ) {}
+///generating new playerid if disconnecte or reload which is wrong 
   async handleConnection(client: Socket) {
-    const playerId = uuidv4();
+    const handshakePlayerId = client.handshake.query.playerId as string | undefined;
+    const playerId = (handshakePlayerId && handshakePlayerId !== 'undefined') ? handshakePlayerId : uuidv4();
     this.socketToPlayer.set(client.id, playerId);
     this.playerSockets.set(playerId, client);
+
+    // --- RECONNECT LOGIC: Clear disconnect timeout if exists ---
+    if (this.disconnectTimeouts.has(playerId)) {
+      clearTimeout(this.disconnectTimeouts.get(playerId));
+      this.disconnectTimeouts.delete(playerId);
+      this.logger.log(`Cleared disconnect timeout for player ${playerId} (reconnected)`);
+    }
+
+    // Re-join any waiting room or active game
+    for (const [matchId, players] of this.waitingRooms.entries()) {
+      if (players.player1 === playerId || players.player2 === playerId) {
+        client.join(matchId);
+        this.logger.log(`Re-joined player ${playerId} to waiting room ${matchId}`);
+      }
+    }
+    for (const [gameId, game] of this.activeGames.entries()) {
+      if (game.players && game.players.includes(playerId)) {
+        client.join(gameId);
+        this.logger.log(`Re-joined player ${playerId} to active game ${gameId}`);
+      }
+    }
 
     // Create a new player in the database if not exists
     await this.gameService.createPlayerIfNotExists(playerId);
@@ -50,24 +79,34 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Remove from lobby queue if present
     this.lobbyQueue = this.lobbyQueue.filter(p => p.socket.id !== client.id);
     
-    // Handle player disconnection from waiting room
-    for (const [matchId, players] of this.waitingRooms.entries()) {
-      if (players.player1 === playerId || players.player2 === playerId) {
-        this.waitingRooms.delete(matchId);
-        this.server.to(matchId).emit('playerDisconnected', { playerId });
+    // --- GRACEFUL DISCONNECT: Start a timeout before removing player from match ---
+    if (this.disconnectTimeouts.has(playerId)) {
+      clearTimeout(this.disconnectTimeouts.get(playerId));
+    }
+    this.disconnectTimeouts.set(playerId, setTimeout(async () => {
+      // Handle player disconnection from waiting room
+      for (const [matchId, players] of this.waitingRooms.entries()) {
+        if (players.player1 === playerId || players.player2 === playerId) {
+          this.waitingRooms.delete(matchId);
+          this.server.to(matchId).emit('playerDisconnected', { playerId });
+        }
       }
-    }
-    
-    // Handle player disconnection from active game
-    const gameId = this.findGameByPlayerId(playerId);
-    if (gameId) {
-      await this.handlePlayerDisconnect(gameId, client.id);
-    }
+      // Handle player disconnection from active game
+      const gameId = this.findGameByPlayerId(playerId);
+      if (gameId) {
+        await this.handlePlayerDisconnect(gameId, playerId);
+      }
+      this.disconnectTimeouts.delete(playerId);
+      this.logger.log(`Player ${playerId} removed after disconnect timeout.`);
+    }, 10000)); // 10 seconds grace period
+    this.logger.log(`Started disconnect timeout for player ${playerId}`);
   }
 
   @SubscribeMessage('joinLobby')
   async handleJoinLobby(client: Socket) {
+    console.log("join lobby");
     const playerId = this.socketToPlayer.get(client.id);
+    console.log(playerId,"playerId here");
     if (!playerId) {
       this.logger.error(`No playerId found for socket ${client.id}`);
       client.emit('error', { message: 'Player ID not found. Please refresh and try again.' });
@@ -150,6 +189,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     if (player1Id && player2Id) {
       // Emit waitingRoomCreated event to all players in the room
+      this.logger.log(`[waitingRoomCreated] Emitting for matchId ${matchId} with player1: ${player1Id}, player2: ${player2Id}`);
       this.server.to(matchId).emit('waitingRoomCreated', {
         matchId,
         player1: { id: player1Id, socketId: this.playerSockets.get(player1Id)?.id || null },
@@ -173,12 +213,44 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         });
       }
     }
+
+    // On reconnect, fetch latest round from DB and update activeGames
+    const rounds = await this.roundService.getRoundsByMatchId(matchId);
+    const latestRound = rounds[rounds.length - 1];
+    if (latestRound && player1Id && player2Id) {
+      const game = {
+        id: matchId,
+        word: latestRound.word,
+        revealedTiles: latestRound.revealedTiles,
+        roundNumber: latestRound.roundNumber,
+        status: 'active',
+        scores: { player1: 0, player2: 0 }, // TODO: fetch actual scores if needed
+        currentRound: latestRound.id,
+        players: [player1Id, player2Id],
+        guesses: new Map(),
+      };
+      this.activeGames.set(matchId, game);
+      client.emit('gameStart', {
+        gameId: matchId,
+        word: latestRound.word,
+        wordLength: latestRound.word.length,
+        roundId: latestRound.id,
+        players: [
+          { id: player1Id },
+          { id: player2Id }
+        ],
+        scores: game.scores,
+        roundNumber: latestRound.roundNumber,
+        revealedTiles: latestRound.revealedTiles
+      });
+    }
   }
   
   @SubscribeMessage('startGame')
   async handleStartGame(client: Socket, { matchId }: { matchId: string }) {
     this.logger.log(`Start game request received for match ${matchId} from socket ${client.id}`);
     
+    // creation
     const playerId = this.socketToPlayer.get(client.id);
     if (!playerId) {
       this.logger.error(`No playerId found for socket ${client.id}`);
@@ -205,39 +277,36 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       // Initialize the game
       this.logger.log(`Initializing game for match ${matchId}`);
-      const game = await this.gameService.initializeGame(matchId);
-      game.players = [player1Id, player2Id];
+      const round = await this.roundService.createAutoRound(matchId);
+      const game = {
+        id: matchId,
+        word: round.word,
+        revealedTiles: new Array(round.word.length).fill(false),
+        roundNumber: round.roundNumber,
+        status: 'active',
+        scores: { player1: 0, player2: 0 },
+        currentRound: round.id,
+        players: [player1Id, player2Id],
+        guesses: new Map(),
+      };
       this.activeGames.set(matchId, game);
-      // Emit gameStart event with the game data
-      this.logger.log(`Emitting gameStart to match ${matchId} with game data:`, {
-        gameId: matchId,
-        wordLength: game.word.length,
-        roundId: game.currentRound,
-        players: [
-          { id: player1Id },
-          { id: player2Id }
-        ],
-        scores: game.scores,
-        roundNumber: game.roundNumber,
-        revealedTiles: game.revealedTiles
-      });
+      this.logger.log('Emitting gameStart with players:', [
+        { id: player1Id },
+        { id: player2Id }
+      ]);
       this.server.to(matchId).emit('gameStart', {
         gameId: matchId,
-        word: game.word,
-        wordLength: game.word.length,
-        roundId: game.currentRound,
+        word: round.word,
+        wordLength: round.word.length,
+        roundId: round.id,
         players: [
           { id: player1Id },
           { id: player2Id }
         ],
         scores: game.scores,
-        roundNumber: game.roundNumber,
+        roundNumber: round.roundNumber,
         revealedTiles: game.revealedTiles
       });
-      // Start the first round
-      setTimeout(() => {
-        this.startRound(matchId);
-      }, 1000);
     } catch (error) {
       this.logger.error(`Failed to start game for match ${matchId}:`, error);
       this.server.to(matchId).emit('error', { message: 'Failed to start game' });
@@ -255,13 +324,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return { error: 'Guesses are locked for this round' };
     }
     if (!game.tickGuesses) game.tickGuesses = new Map();
-    if (!game.roundTimer) return { error: 'No round timer' };
-    if (!timestamp || timestamp - game.tickStartTime > 10000) {
-      return { error: 'Late submission' };
-    }
+    if (!game.tickInterval) return { error: 'No round timer' };
     // Map socket ID to player ID
     const playerId = this.socketToPlayer.get(client.id);
     if (!playerId) return { error: 'Player not found' };
+
+    // Save guess in DB
+    await this.guessService.createGuess(game.currentRound, playerId, guess);
+
     // Allow multiple guesses per round, always store the latest
     game.tickGuesses.set(playerId, { guess, tick: game.currentTick });
     // Map guesses to { player1: [...], player2: [...] }
@@ -280,6 +350,24 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       ]
     });
 
+    // Reveal a random tile on every guess
+    const unrevealedIndices = game.revealedTiles
+      .map((revealed, idx) => revealed ? -1 : idx)
+      .filter(idx => idx !== -1);
+    if (unrevealedIndices.length > 0) {
+      const randomIndex = unrevealedIndices[Math.floor(Math.random() * unrevealedIndices.length)];
+      game.revealedTiles[randomIndex] = true;
+      this.server.to(gameId).emit('revealTile', {
+        gameId,
+        index: randomIndex,
+        letter: game.word[randomIndex],
+        revealedTiles: game.revealedTiles,
+        players: game.players,
+        scores: game.scores,
+        roundNumber: game.roundNumber
+      });
+    }
+
     // Check for correct guess
     const correctPlayers = Array.from(game.tickGuesses.entries())
       .filter(([_, g]) => g.guess.trim().toUpperCase() === game.word)
@@ -287,7 +375,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (correctPlayers.length > 0) {
       // End the round immediately
       game.tickStatus = 'ended';
-      if (game.roundTimer) clearTimeout(game.roundTimer);
+      if (game.tickInterval) clearInterval(game.tickInterval);
       let winner = null;
       if (correctPlayers.length === 1) {
         winner = correctPlayers[0];
@@ -296,52 +384,67 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return { status: 'winner', winner, revealedWord: game.word };
     }
 
-    // Reveal a random tile after every guess (if not complete)
-    const revealedTile = await this.gameService.revealRandomTile(gameId);
-    if (revealedTile) {
-      this.server.to(gameId).emit('revealTile', {
-        gameId,
-        index: revealedTile.index,
-        letter: revealedTile.letter,
-        word: game.word,
-        players: [
-          { id: player1Id },
-          { id: player2Id }
-        ],
-        revealedTiles: game.revealedTiles,
-        scores: game.scores,
-        roundNumber: game.roundNumber
-      });
-      if (revealedTile.isComplete) {
-        game.tickStatus = 'ended';
-        if (game.roundTimer) clearTimeout(game.roundTimer);
-        this.endRound(gameId, { winner: null, revealedWord: game.word });
-      }
+    // If >60% revealed and no winner, end round
+    const revealedCount = game.revealedTiles.filter(Boolean).length;
+    const revealPercent = revealedCount / game.word.length;
+    if (revealPercent > 0.6) {
+      if (game.tickInterval) clearInterval(game.tickInterval);
+      game.tickStatus = 'ended';
+      this.endRound(gameId, { winner: null, revealedWord: game.word });
+      return { status: 'no winner', revealedWord: game.word };
     }
     return { status: 'guess recorded' };
   }
 
-  // New: Start a round with a 10s timer
   private startRound(gameId: string) {
     const game = this.activeGames.get(gameId);
     if (!game) return;
-    game.roundTimer && clearTimeout(game.roundTimer);
-    game.tickStatus = 'in-progress';
+
+    // Reset guesses and revealedTiles for the round
     game.tickGuesses = new Map();
-    game.tickStartTime = Date.now();
-    // 10s round timer
-    game.roundTimer = setTimeout(() => {
-      this.endRound(gameId, { winner: null, revealedWord: game.word });
-    }, 10000);
+    game.revealedTiles = new Array(game.word.length).fill(false);
+    game.tickStatus = 'in-progress';
+    game.tickCount = 0;
+
+    // Helper to count revealed tiles
+    const revealedCount = () => game.revealedTiles.filter(Boolean).length;
+    const revealPercent = () => revealedCount() / game.word.length;
+
+    // Start the tick interval
+    game.tickInterval = setInterval(async () => {
+      // Reveal a random tile
+      const unrevealedIndices = game.revealedTiles
+        .map((revealed, idx) => revealed ? -1 : idx)
+        .filter(idx => idx !== -1);
+      if (unrevealedIndices.length > 0) {
+        const randomIndex = unrevealedIndices[Math.floor(Math.random() * unrevealedIndices.length)];
+        game.revealedTiles[randomIndex] = true;
+        this.server.to(gameId).emit('revealTile', {
+          gameId,
+          index: randomIndex,
+          letter: game.word[randomIndex],
+          revealedTiles: game.revealedTiles,
+          players: game.players,
+          scores: game.scores,
+          roundNumber: game.roundNumber
+        });
+      }
+
+      // If >60% revealed and no winner, end round
+      if (revealPercent() > 0.6) {
+        clearInterval(game.tickInterval);
+        game.tickStatus = 'ended';
+        this.endRound(gameId, { winner: null, revealedWord: game.word });
+      }
+    }, 2000); // 2 seconds per tick (adjust as needed)
+
+    // Emit tickStart to both players
     this.server.to(gameId).emit('tickStart', {
       gameId,
-      timeRemaining: 10000,
+      timeRemaining: 2000,
       word: game.word,
       revealedTiles: game.revealedTiles,
-      players: [
-        { id: game.players[0] },
-        { id: game.players[1] }
-      ],
+      players: game.players,
       scores: game.scores,
       roundNumber: game.roundNumber
     });
@@ -350,7 +453,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private async endRound(gameId: string, result: any) {
     const game = this.activeGames.get(gameId);
     if (!game) return;
-    if (game.roundTimer) clearTimeout(game.roundTimer);
+    if (game.tickInterval) clearInterval(game.tickInterval);
     await this.gameService.endRound(gameId, result);
     // Map guesses to { player1: [...], player2: [...] }
     const player1Id = game.players[0];
@@ -381,21 +484,28 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       setTimeout(() => this.endGame(gameId), 3000);
     } else {
       setTimeout(async () => {
-        // Start next round
-        const newGame = await this.gameService.initializeGame(gameId);
-        newGame.players = game.players;
+        // Start next round using DB
+        const round = await this.roundService.createAutoRound(gameId);
+        const newGame = {
+          ...game,
+          word: round.word,
+          revealedTiles: new Array(round.word.length).fill(false),
+          roundNumber: round.roundNumber,
+          currentRound: round.id,
+          guesses: new Map(),
+        };
         this.activeGames.set(gameId, newGame);
         this.server.to(gameId).emit('gameStart', {
           gameId,
-          word: newGame.word,
-          wordLength: newGame.word.length,
-          roundId: newGame.currentRound,
+          word: round.word,
+          wordLength: round.word.length,
+          roundId: round.id,
           players: [
             { id: newGame.players[0] },
             { id: newGame.players[1] }
           ],
           scores: newGame.scores,
-          roundNumber: newGame.roundNumber,
+          roundNumber: round.roundNumber,
           revealedTiles: newGame.revealedTiles
         });
         setTimeout(() => {
@@ -459,4 +569,3 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return null; // Draw
   }
 }
-

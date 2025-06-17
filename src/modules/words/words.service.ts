@@ -9,7 +9,8 @@ export class WordsService {
   constructor() {
     const filePath = path.join(process.cwd(), 'src', 'data', 'word.json');
     const raw = fs.readFileSync(filePath, 'utf-8');
-    this.words = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    this.words = Array.isArray(parsed.words) ? parsed.words : [];
   }
 
   getRandomWords(count = 5): string[] {
